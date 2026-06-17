@@ -1,0 +1,15 @@
+name: wall
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - jupyterlab
+  - ipykernel
+  - numpy
+  - pandas
+  - polars
+  - pyarrow
+  - matplotlib
+  - pip:
+      - demoparser2
