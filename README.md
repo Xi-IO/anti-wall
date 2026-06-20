@@ -31,27 +31,23 @@
 
 ## 环境配置
 
-### 1. 创建环境
+项目本身不要求 `conda`。  
+只要你使用的是 `Python 3.11`，推荐直接在普通虚拟环境里安装：
 
 ```powershell
-conda env create -f environment.yml
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+pip install -e .[dev]
 ```
 
-### 2. 激活环境
+如果你平时使用 `conda`，也可以在任意 `Python 3.11` 的 conda 环境里执行同样的安装命令：
 
 ```powershell
-conda activate wall
+pip install -e .[dev]
 ```
 
-### 3. 安装本地包
-
-推荐把仓库以 editable 方式装进当前环境：
-
-```powershell
-pip install -e .
-```
-
-这样可以直接使用：
+安装完成后可以直接使用：
 
 ```powershell
 wall --help
@@ -212,11 +208,7 @@ wall catalog outputs\match730_003825715054175584453_1941916173_129
 
 - `wall.table_registry`
 
-如果环境里还没有 `duckdb`，补装后即可使用：
-
-```powershell
-conda install -n wall -c conda-forge duckdb
-```
+按当前配置，`duckdb` 会随项目依赖一起安装，不需要再单独补装。
 
 ## 回合推断逻辑
 
