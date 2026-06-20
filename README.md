@@ -1,6 +1,6 @@
 # wall
 
-`wall` 是一个面向 Counter-Strike 2 demo 分析的研究型项目，当前目标是搭建一套用于“透视挂鉴别”的数据处理与可视化基础设施。
+`wall` 当前定位为一个面向 Counter-Strike 2 的 demo 解析与播放工具。
 
 目前项目已经完成这几件核心工作：
 
@@ -8,23 +8,22 @@
 - 导出 `ticks`、`player_death`、推断回合表
 - 从 demo header 中提取地图等基础信息并落盘
 - 使用 Awpy 官方地图数据作为回合渲染背景
-- 提供命令行导图脚本和本地 GUI 播放器
+- 提供本地 pygame GUI 播放器
+- 提供统一 CLI：`wall <demo或数据集目录>` 和 `wall catalog`
 
 ## 当前目录
 
-当前主要保留的脚本有：
+当前正式实现位于：
 
-- [`scripts/parse_demo_sample.py`](./scripts/parse_demo_sample.py)
-  - 解析 demo
-  - 推断回合边界
-  - 导出结构化结果
-- [`scripts/round_render.py`](./scripts/round_render.py)
-  - 公共渲染逻辑
-  - 负责地图背景、玩家点位、朝向扇形、死亡标记
-- [`scripts/animate_round.py`](./scripts/animate_round.py)
-  - 命令行导出单回合或多回合 `png/gif`
-- [`scripts/round_gui.py`](./scripts/round_gui.py)
-  - 本地 GUI 播放器
+- [`src/wall/`](./src/wall)
+  - `cli.py`：统一命令入口
+  - `io/`：解析、表读写、DuckDB catalog
+  - `render/`：渲染逻辑与 pygame 效果
+  - `viewer/`：pygame 播放器
+
+兼容策略、技术路线和后续改造方向单独整理在：
+
+- [`docs/technical-roadmap.md`](./docs/technical-roadmap.md)
 
 示例 demo 位于：
 
@@ -44,7 +43,21 @@ conda env create -f environment.yml
 conda activate wall
 ```
 
-### 3. 安装 Awpy 地图数据
+### 3. 安装本地包
+
+推荐把仓库以 editable 方式装进当前环境：
+
+```powershell
+pip install -e .
+```
+
+这样可以直接使用：
+
+```powershell
+wall --help
+```
+
+### 4. 安装 Awpy 地图数据
 
 第一次使用地图背景前，需要拉取 Awpy 官方地图资源：
 
@@ -56,6 +69,41 @@ awpy get maps
 
 - `C:\Users\26759\.awpy\maps\`
 
+## CLI
+
+主入口是：
+
+```powershell
+wall --help
+```
+
+当前日常使用只需要一个入口：
+
+```powershell
+wall demo\match730_003825715054175584453_1941916173_129.dem
+```
+
+行为规则：
+
+- 传 `.dem` 文件：
+  - 如果对应数据集目录不存在，就先解析
+  - 如果对应数据集目录已经存在，就直接用现有数据集打开
+- 传 `outputs\xxx` 这种数据集目录：
+  - 直接打开 viewer
+- 如果想强制更新中间数据：
+  - 使用 `--renew`
+
+例如：
+
+```powershell
+wall demo\match730_003825715054175584453_1941916173_129.dem --renew
+wall outputs\match730_003825715054175584453_1941916173_129
+```
+
+保留的显式辅助命令只有：
+
+- `wall catalog <dataset_dir>`：为数据集构建 DuckDB catalog
+
 ## 解析 demo
 
 解析脚本会：
@@ -66,10 +114,24 @@ awpy get maps
 - 根据“多人同步位置跳变”推断回合边界
 - 生成元数据文件
 
-运行方式：
+如果你只是想“打开并看 demo”，优先直接使用：
 
 ```powershell
-python scripts\parse_demo_sample.py demo\match730_003825715054175584453_1941916173_129.dem --output-dir outputs
+wall demo\match730_003825715054175584453_1941916173_129.dem
+```
+
+底层行为仍然是“解析 demo -> 生成数据集目录 -> 打开 viewer”。
+
+如果你只是想单独触发解析并更新中间数据，也可以直接用：
+
+```powershell
+wall demo\match730_003825715054175584453_1941916173_129.dem --renew
+```
+
+默认会优先把所有表写成 `parquet`；如果你确实需要旧格式，也可以显式指定：
+
+```powershell
+wall demo\match730_003825715054175584453_1941916173_129.dem --renew --table-format csv
 ```
 
 默认输出到：
@@ -82,10 +144,12 @@ python scripts\parse_demo_sample.py demo\match730_003825715054175584453_19419161
 
 其中包含：
 
-- [`ticks.csv`](./outputs/match730_003825715054175584453_1941916173_129/ticks.csv)
-- [`player_death.csv`](./outputs/match730_003825715054175584453_1941916173_129/player_death.csv)
-- [`inferred_rounds.csv`](./outputs/match730_003825715054175584453_1941916173_129/inferred_rounds.csv)
+- [`ticks.parquet`](./outputs/match730_003825715054175584453_1941916173_129/ticks.parquet)
+- [`player_death.parquet`](./outputs/match730_003825715054175584453_1941916173_129/player_death.parquet)
+- [`inferred_rounds.parquet`](./outputs/match730_003825715054175584453_1941916173_129/inferred_rounds.parquet)
 - [`metadata.json`](./outputs/match730_003825715054175584453_1941916173_129/metadata.json)
+
+读取端会自动优先读 `parquet`，不存在时再回退到 `csv`，所以旧输出目录仍然兼容。
 
 ### metadata.json 当前包含的信息
 
@@ -101,74 +165,58 @@ python scripts\parse_demo_sample.py demo\match730_003825715054175584453_19419161
 
 - `map_name = de_dust2`
 
-## 回合导图
-
-### 导出单张静态图
-
-```powershell
-python scripts\animate_round.py outputs\match730_003825715054175584453_1941916173_129 --round 1 --format png
-```
-
-### 导出单回合动画
-
-```powershell
-python scripts\animate_round.py outputs\match730_003825715054175584453_1941916173_129 --round 1 --format gif
-```
-
-### 导出回合区间
-
-```powershell
-python scripts\animate_round.py outputs\match730_003825715054175584453_1941916173_129 --round 1-4 --format gif
-```
-
-### 不写 `--round`
-
-不写 `--round` 时，默认导出全部推断回合。
-
-```powershell
-python scripts\animate_round.py outputs\match730_003825715054175584453_1941916173_129 --format gif
-```
-
-### 当前渲染内容
-
-渲染结果包含：
-
-- Awpy 官方地图底图
-- 玩家当前位置
-- 玩家尾迹
-- 玩家朝向扇形
-- 玩家死亡位置同色 `x`
-
-当前配色约定：
-
-- 警：`#1991BD`
-- 匪：`#D9CD21`
-- 朝向扇形透明度：`0.6`
-
 ## GUI 播放器
 
-启动本地 GUI：
+启动本地 pygame GUI：
 
 ```powershell
-python scripts\round_gui.py outputs\match730_003825715054175584453_1941916173_129
+wall outputs\match730_003825715054175584453_1941916173_129
 ```
 
-只展示指定回合范围：
+指定初始回合：
 
 ```powershell
-python scripts\round_gui.py outputs\match730_003825715054175584453_1941916173_129 --round 1-4
+wall outputs\match730_003825715054175584453_1941916173_129 --round 1
 ```
 
-GUI 当前支持：
+当前 viewer 支持：
 
 - 选择推断回合
 - 播放 / 暂停
 - 拖动时间帧
-- 调整 `frame step`
-- 调整 `trail`
-- 调整 `facing radius`
-- 调整 `facing FOV`
+- 选择播放倍速
+- 地图内显示固定 HUD 编号和玩家 ID
+- 掉血闪红、死亡叉、枪口火光和 tracer
 - 基于 Awpy 地图底图显示玩家移动
+
+## DuckDB
+
+解析后的表可以注册进一个本地 DuckDB catalog：
+
+```powershell
+wall catalog outputs\match730_003825715054175584453_1941916173_129
+```
+
+默认会生成：
+
+- [`tables.duckdb`](./outputs/match730_003825715054175584453_1941916173_129/tables.duckdb)
+
+库里会创建 `wall` schema，并把每张表注册成同名 view，例如：
+
+- `wall.ticks`
+- `wall.player_death`
+- `wall.grenades`
+- `wall.inferred_rounds`
+
+同时还会生成一张注册表：
+
+- `wall.table_registry`
+
+如果环境里还没有 `duckdb`，补装后即可使用：
+
+```powershell
+conda install -n wall -c conda-forge duckdb
+```
 
 ## 回合推断逻辑
 
@@ -192,27 +240,14 @@ GUI 当前支持：
 - 出生点切换
 - freeze/live 之间的大跳变
 
-## 当前状态
+## 更多设计说明
 
-当前仓库更接近“第一版可运行的数据与可视化工作流”，已经可以用于：
+关于这些内容的详细设计说明，见：
 
-- 从 demo 稳定导出结构化数据
-- 快速检查地图、玩家、回合分段
-- 在地图背景上查看单回合玩家运动
-
-还没有系统完成的部分主要是：
-
-- 更严格的 live phase 识别
-- 真正面向透视挂鉴别的特征工程
-- 视角行为统计与信息论指标
-- 训练 / 验证数据集构建
-
-## 后续方向
-
-下一阶段更值得做的是：
-
-- 导出更多事件表，例如 `damage`、`shots`、`grenades`
-- 做视角变化速度、停顿、预瞄等行为特征
-- 将 `ticks` 与击杀事件窗口联表
-- 引入信息论指标，例如熵、互信息、条件信息增益
-- 在 GUI 中增加更强的筛选与事件高亮能力
+- [`docs/technical-roadmap.md`](./docs/technical-roadmap.md)
+  - 兼容策略
+  - 包结构与 CLI 路线
+  - dataset / parquet / DuckDB 路线
+  - 声音可视化与玩家信息面板
+  - 可见性计算分阶段方案
+  - 小模型 / 大模型的使用建议

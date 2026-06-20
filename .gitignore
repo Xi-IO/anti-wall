@@ -8,21 +8,37 @@ __pycache__/
 *.pyo
 *.pyd
 *.egg-info/
+.eggs/
 .ipynb_checkpoints/
+.python-version
 
 # OS / editor noise
 .DS_Store
 Thumbs.db
 desktop.ini
+.idea/
+.vscode/
 
 # Python tooling
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+pip-wheel-metadata/
 
 # Local outputs
 outputs/
 outputs_player/
+tmp_*/
+*.duckdb
+*.duckdb.wal
+*.db
+*.sqlite
+*.sqlite3
 
 # Local Awpy cache
 .awpy/

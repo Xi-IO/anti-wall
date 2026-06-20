@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wall"
+version = "0.1.0"
+description = "CS2 demo parser and pygame viewer"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "OpenAI Codex" }]
+dependencies = [
+  "awpy",
+  "demoparser2",
+  "duckdb",
+  "numpy",
+  "pandas",
+  "pillow",
+  "pyarrow",
+  "pygame",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ipykernel",
+  "jupyterlab",
+  "matplotlib",
+  "polars",
+  "pytest",
+  "ruff",
+]
+
+[project.scripts]
+wall = "wall.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -4,12 +4,16 @@ channels:
 dependencies:
   - python=3.11
   - pip
+  - awpy
+  - duckdb
   - jupyterlab
   - ipykernel
+  - matplotlib
   - numpy
   - pandas
+  - pillow
   - polars
   - pyarrow
-  - matplotlib
+  - pygame
   - pip:
       - demoparser2
