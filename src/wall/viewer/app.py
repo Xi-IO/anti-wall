@@ -6,8 +6,8 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import math
 from pathlib import Path
-import random
 
+import numpy as np
 import pandas as pd
 
 try:
@@ -18,8 +18,10 @@ except ModuleNotFoundError as exc:
         "Install it in the 'wall' environment first, then rerun this viewer."
     ) from exc
 
+from wall.domain.bomb import BombTimeline, DefuseAttempt
+from wall.domain.player import PlayerFrame, RoundPlayers
+from wall.domain.utility import UtilityTimeline
 from wall.paths import awpy_maps_dir, resolve_asset_path
-from wall.render.round_pygame_components import BlindEffectTracker, BombStateTracker
 from wall.render.round_pygame_effects import draw_blind_glow, draw_flash_eye, draw_flash_eye_texture, load_flash_eye_texture, mix_with_white
 from wall.render.round_render import MAP_DATA, game_to_pixel_axis, get_round_data, load_round_data, team_color
 
@@ -76,6 +78,25 @@ DEFUSE_BAR_COLOR = C4_DEFUSED_COLOR
 DEFUSE_BAR_SHADOW = (34, 54, 34, 220)
 DEFUSE_BAR_GLOW = (170, 255, 150, 120)
 DEFUSE_SHAKE_TICKS = 20
+BOMB_PLANTED_DURATION_SECONDS = 40.0
+SOUND_MAX_DISPLAY_RADIUS_RATIO = 0.40
+SOUND_RING_WIDTH = 2
+SOUND_FILL_ALPHA = 28
+SOUND_BASE_ALPHA = 170
+SOUND_GLOBAL_ALPHA_BOOST = 24
+SOUND_START_EXPAND_TICKS = 4
+SOUND_END_SHRINK_TICKS = 4
+SOUND_LABEL_DISTANCE_PX = 6
+SOUND_SUPPRESSION_DISTANCE_PX = 44.0
+SOUND_STYLE_BY_KIND = {
+    "footstep": {"color": (104, 214, 144), "label": None, "alpha_mult": 1.15, "ring_width": 2, "priority": 40, "display_radius_mult": 0.62, "fill_alpha_mult": 0.0},
+    "landing": {"color": (176, 108, 48), "label": None, "alpha_mult": 1.05, "ring_width": 2, "priority": 30, "display_radius_mult": 1.0, "fill_alpha_mult": 0.10},
+    "gunfire": {"color": (245, 245, 245), "label": "MAP", "alpha_mult": 0.42, "ring_width": 2, "priority": 10, "fill_alpha_mult": 0.0},
+    "damage": {"color": (224, 78, 78), "label": None, "alpha_mult": 0.82, "ring_width": 2, "priority": 25, "display_radius_mult": 0.72, "fill_alpha_mult": 0.08},
+    "grenade_bounce": {"color": (245, 245, 245), "label": None, "alpha_mult": 0.72, "ring_width": 2, "priority": 35, "display_radius_mult": 0.72, "fill_alpha_mult": 0.0},
+    "utility": {"color": (245, 245, 245), "label": None, "alpha_mult": 0.48, "ring_width": 2, "priority": 20, "fill_alpha_mult": 0.0},
+    "bomb": {"color": (244, 210, 91), "label": None, "alpha_mult": 0.58, "ring_width": 2, "priority": 20},
+}
 
 
 def format_hud_number(number: int) -> str:
@@ -103,6 +124,7 @@ class PygameRoundRenderer:
         round_blinds: pd.DataFrame,
         round_bomb_pickups: pd.DataFrame,
         round_bomb_drops: pd.DataFrame,
+        round_bomb_begin_plants: pd.DataFrame,
         round_bomb_plants: pd.DataFrame,
         round_bomb_defuses: pd.DataFrame,
         round_bomb_begin_defuses: pd.DataFrame,
@@ -111,6 +133,7 @@ class PygameRoundRenderer:
         round_smoke_expires: pd.DataFrame,
         round_inferno_starts: pd.DataFrame,
         round_grenades: pd.DataFrame,
+        round_sound_events: pd.DataFrame,
         player_numbers: dict[str, int] | None,
         width: int,
         height: int,
@@ -130,6 +153,7 @@ class PygameRoundRenderer:
         self.round_blinds = self._sort_if_has_columns(round_blinds, ["tick"])
         self.round_bomb_pickups = self._sort_if_has_columns(round_bomb_pickups, ["tick"])
         self.round_bomb_drops = self._sort_if_has_columns(round_bomb_drops, ["tick"])
+        self.round_bomb_begin_plants = self._sort_if_has_columns(round_bomb_begin_plants, ["tick"])
         self.round_bomb_plants = self._sort_if_has_columns(round_bomb_plants, ["tick"])
         self.round_bomb_defuses = self._sort_if_has_columns(round_bomb_defuses, ["tick"])
         self.round_bomb_begin_defuses = self._sort_if_has_columns(round_bomb_begin_defuses, ["tick"])
@@ -138,6 +162,8 @@ class PygameRoundRenderer:
         self.round_smoke_expires = self._sort_if_has_columns(round_smoke_expires, ["tick"])
         self.round_inferno_starts = self._sort_if_has_columns(round_inferno_starts, ["tick"])
         self.round_grenades = self._sort_if_has_columns(round_grenades, ["grenade_entity_id", "tick"])
+        self.round_sound_events = self._sort_if_has_columns(round_sound_events, ["tick", "sound_kind"])
+        self.show_sound_effects = True
         self.width = width
         self.height = height
         self.trail = trail
@@ -148,7 +174,15 @@ class PygameRoundRenderer:
         self.round_id = int(self.round_ticks["inferred_round_id"].iloc[0])
         self.round_start_tick = int(self.round_ticks["tick"].min())
         self.frame_ticks = [int(tick) for tick in self.round_ticks["tick"].sort_values().unique().tolist()]
-        self.players = sorted(self.round_ticks["name"].dropna().unique())
+        self.round_players = RoundPlayers.from_round_ticks(
+            self.round_ticks,
+            self.round_deaths,
+            round_fires=self.round_fires,
+            round_hurts=self.round_hurts,
+            round_blinds=self.round_blinds,
+            tickrate=self.tickrate,
+        )
+        self.players = sorted(self.round_players.ordered_names)
         if player_numbers is None:
             self.player_numbers = {player: index + 1 for index, player in enumerate(self.players)}
         else:
@@ -162,34 +196,38 @@ class PygameRoundRenderer:
                     next_fallback += 1
             self.player_numbers = resolved_numbers
             self.players = sorted(self.players, key=lambda player: (self.player_numbers[player], player))
-        self.death_lookup = self._build_death_lookup()
-        self.death_tick_lookup = self._build_death_tick_lookup()
-        self.damage_flash_lookup = self._build_damage_flash_lookup()
-        self.fire_lookup = self._build_fire_lookup()
-        self.hurt_lookup = self._build_hurt_lookup()
-        self.grenade_trails = self._build_grenade_trails()
-        self.smoke_windows = self._build_smoke_windows()
-        self.smoke_start_tick_by_entity = self._build_smoke_start_tick_by_entity()
-        self.flash_effects = self._build_flash_effects()
-        self.he_effects = self._build_he_effects()
-        self.inferno_effects = self._build_inferno_effects()
-        self.smoke_holes_by_window = self._build_smoke_holes_by_window()
-        self.flash_start_tick_by_entity = self._build_flash_start_tick_by_entity()
+        self.utility_timeline = UtilityTimeline(
+            round_smoke_detonates=self.round_smoke_detonates,
+            round_smoke_expires=self.round_smoke_expires,
+            round_flash_detonates=self.round_flash_detonates,
+            round_he_detonates=self.round_he_detonates,
+            round_inferno_starts=self.round_inferno_starts,
+            round_grenades=self.round_grenades,
+            flash_effect_ticks=FLASH_EFFECT_TICKS,
+            he_effect_ticks=HE_EFFECT_TICKS,
+            inferno_duration_ticks=int(round(self.tickrate * INFERNO_DURATION_SECONDS)),
+            inferno_ct_radius_world=INFERNO_CT_RADIUS_WORLD,
+            inferno_t_radius_world=INFERNO_T_RADIUS_WORLD,
+            smoke_radius_world=SMOKE_RADIUS_WORLD,
+            smoke_deploy_ticks=SMOKE_DEPLOY_TICKS,
+            player_team_lookup=self._lookup_player_team_num,
+        )
         self.damage_flash_duration_ticks = 96
         self.fire_flash_duration_ticks = 32
         self.hit_match_window_ticks = 12
-        self.blind_tracker = BlindEffectTracker(self.round_blinds, self.tickrate)
-        self.bomb_tracker = BombStateTracker(
-            round_ticks=self.round_ticks,
+        self.bomb_tracker = BombTimeline(
             round_bomb_pickups=self.round_bomb_pickups,
             round_bomb_drops=self.round_bomb_drops,
+            round_bomb_begin_plants=self.round_bomb_begin_plants,
             round_bomb_plants=self.round_bomb_plants,
             round_bomb_defuses=self.round_bomb_defuses,
+            round_bomb_begin_defuses=self.round_bomb_begin_defuses,
+            round_bomb_abort_defuses=self.round_bomb_abort_defuses,
             round_bomb_explodes=self.round_bomb_explodes,
-            death_tick_lookup=self.death_tick_lookup,
             frame_ticks=self.frame_ticks,
+            tickrate=self.tickrate,
+            round_players=self.round_players,
         )
-        self.defuse_attempts = self._build_defuse_attempts()
 
         self.background_original = self._load_background_image()
         self.uses_map_background = self.background_original is not None and self.map_name in MAP_DATA and game_to_pixel_axis is not None
@@ -205,7 +243,9 @@ class PygameRoundRenderer:
         self.he_animation_frames = self._load_he_animation_frames()
         self.fire_animation_layers = self._load_fire_animation_layers()
         self.soft_circle_masks: dict[tuple[int, int], pygame.Surface] = {}
+        self.sound_ring_cache: dict[tuple[int, int, tuple[int, int, int], int], pygame.Surface] = {}
         self.c4_icons = self._load_c4_icons()
+        self.sound_toggle_icons = self._load_sound_toggle_icons()
         self.flash_eye_texture = load_flash_eye_texture()
         self.smoke_texture = self._build_smoke_texture()
 
@@ -213,59 +253,6 @@ class PygameRoundRenderer:
         if df.empty or not all(column in df.columns for column in columns):
             return df.copy()
         return df.sort_values(columns).copy()
-
-    def _build_death_lookup(self) -> dict[str, list[pd.Series]]:
-        lookup: dict[str, list[pd.Series]] = {}
-        for _, row in self.round_deaths.iterrows():
-            lookup.setdefault(str(row["user_name"]), []).append(row)
-        return lookup
-
-    def _build_death_tick_lookup(self) -> dict[str, int]:
-        lookup: dict[str, int] = {}
-        for player, rows in self.death_lookup.items():
-            if rows:
-                lookup[player] = int(rows[0]["tick"])
-        return lookup
-
-    def _build_damage_flash_lookup(self) -> dict[str, list[tuple[int, float]]]:
-        if "health" not in self.round_ticks.columns:
-            return {}
-        work = self.round_ticks[["name", "tick", "health"]].copy()
-        work["health"] = pd.to_numeric(work["health"], errors="coerce")
-        lookup: dict[str, list[tuple[int, float]]] = {}
-        for player, group in work.groupby("name", sort=False):
-            group = group.sort_values("tick").copy()
-            group["prev_health"] = group["health"].shift(1)
-            drops = group[
-                group["health"].notna()
-                & group["prev_health"].notna()
-                & (group["health"] < group["prev_health"])
-            ]
-            if not drops.empty:
-                lookup[str(player)] = [
-                    (int(row["tick"]), float(row["prev_health"] - row["health"]))
-                    for _, row in drops.iterrows()
-                ]
-        return lookup
-
-    def _build_fire_lookup(self) -> dict[str, list[pd.Series]]:
-        if self.round_fires.empty or "user_name" not in self.round_fires.columns:
-            return {}
-        lookup: dict[str, list[pd.Series]] = {}
-        for _, row in self.round_fires.iterrows():
-            lookup.setdefault(str(row["user_name"]), []).append(row)
-        return lookup
-
-    def _build_hurt_lookup(self) -> dict[str, list[pd.Series]]:
-        if self.round_hurts.empty or "attacker_name" not in self.round_hurts.columns:
-            return {}
-        lookup: dict[str, list[pd.Series]] = {}
-        for _, row in self.round_hurts.iterrows():
-            attacker_name = row.get("attacker_name")
-            if pd.isna(attacker_name):
-                continue
-            lookup.setdefault(str(attacker_name), []).append(row)
-        return lookup
 
     def _load_background_image(self) -> pygame.Surface | None:
         if not self.map_name:
@@ -275,306 +262,22 @@ class PygameRoundRenderer:
             return None
         return pygame.image.load(str(map_path)).convert()
 
+    def _player_timeline(self, player_name: str | None) -> PlayerTimeline | None:
+        if not player_name:
+            return None
+        return self.round_players.get_by_name(player_name)
+
+    def _player_frame(self, player_name: str | None, frame_tick: int) -> PlayerFrame | None:
+        timeline = self._player_timeline(player_name)
+        if timeline is None:
+            return None
+        return timeline.frame_at(frame_tick)
+
     def _lookup_player_team_num(self, player_name: str, steamid: str | None, tick: int) -> int | None:
-        if self.round_ticks.empty or "team_num" not in self.round_ticks.columns:
+        frame = self.round_players.frame_at(steamid=steamid, name=player_name, tick=tick)
+        if frame is None:
             return None
-        work = self.round_ticks[self.round_ticks["name"].astype(str) == player_name].copy()
-        if steamid is not None and "player_steamid" in work.columns:
-            work = work[work["player_steamid"].astype(str) == steamid].copy()
-        if work.empty:
-            return None
-        work["tick"] = pd.to_numeric(work["tick"], errors="coerce")
-        work["team_num"] = pd.to_numeric(work["team_num"], errors="coerce")
-        exact = work[work["tick"] == tick]
-        if exact.empty:
-            exact = work[(work["tick"] >= tick - 2) & (work["tick"] <= tick + 2)].sort_values("tick")
-        if exact.empty:
-            return None
-        team_num = exact["team_num"].iloc[0]
-        if pd.isna(team_num):
-            return None
-        return int(team_num)
-
-    def _match_inferno_start(self, player_name: str, steamid: str | None, projectile_end_tick: int) -> pd.Series | None:
-        if self.round_inferno_starts.empty or "user_name" not in self.round_inferno_starts.columns:
-            return None
-        work = self.round_inferno_starts[self.round_inferno_starts["user_name"].astype(str) == player_name].copy()
-        if steamid is not None and "user_steamid" in work.columns:
-            work = work[work["user_steamid"].astype(str) == steamid].copy()
-        if work.empty:
-            return None
-        work["tick"] = pd.to_numeric(work["tick"], errors="coerce")
-        work["delta"] = work["tick"] - projectile_end_tick
-        close = work[(work["delta"] >= -2) & (work["delta"] <= 6)].sort_values(["delta", "tick"])
-        if close.empty:
-            return None
-        return close.iloc[0]
-
-    def _build_grenade_trails(self) -> list[pd.DataFrame]:
-        if self.round_grenades.empty:
-            return []
-        required = {"grenade_type", "grenade_entity_id", "x", "y", "z", "tick"}
-        if not required.issubset(self.round_grenades.columns):
-            return []
-        work = self.round_grenades.copy()
-        work = work[work["grenade_type"].astype(str).str.contains("Projectile", na=False)].copy()
-        work = work[work[["x", "y", "z"]].notna().all(axis=1)].copy()
-        if work.empty:
-            return []
-        work["grenade_entity_id"] = pd.to_numeric(work["grenade_entity_id"], errors="coerce")
-        work = work[work["grenade_entity_id"].notna()].copy()
-        trails: list[pd.DataFrame] = []
-        for _, group in work.groupby(["grenade_entity_id", "steamid", "name"], sort=False):
-            group = group.sort_values("tick").copy()
-            tick_diff = group["tick"].diff().fillna(1)
-            segment_id = (tick_diff > 2).cumsum()
-            longest_segment = group.groupby(segment_id, sort=False).size().idxmax()
-            segment = group[segment_id == longest_segment].copy()
-            current_row = segment.iloc[-1]
-            segment["burn_icon_path"] = None
-            segment["did_burn"] = False
-            if str(current_row["grenade_type"]) == "CMolotovProjectile":
-                player_name = str(current_row.get("name", ""))
-                steamid_value = current_row.get("steamid")
-                steamid = None if pd.isna(steamid_value) else str(steamid_value)
-                inferno_start = self._match_inferno_start(player_name, steamid, int(current_row["tick"]))
-                team_tick = int(inferno_start["tick"]) if inferno_start is not None else int(current_row["tick"])
-                team_num = self._lookup_player_team_num(player_name, steamid, team_tick)
-                segment["burn_icon_path"] = "incgrenade.png" if team_num == 3 else "firebomb.png"
-                segment["did_burn"] = inferno_start is not None
-            trails.append(segment)
-        return trails
-
-    def _build_smoke_windows(self) -> list[dict[str, float | int]]:
-        if self.round_smoke_detonates.empty:
-            return []
-        windows: list[dict[str, float | int]] = []
-        expires = self.round_smoke_expires.copy() if not self.round_smoke_expires.empty else pd.DataFrame()
-        used_expire_indices: set[int] = set()
-        for _, detonate in self.round_smoke_detonates.iterrows():
-            start_tick = int(detonate["tick"])
-            end_tick = start_tick + 1152
-            matched_index: int | None = None
-            if not expires.empty and "entityid" in detonate.index and "entityid" in expires.columns:
-                entity_matches = expires[
-                    (expires["entityid"] == detonate["entityid"])
-                    & (expires["tick"] >= start_tick)
-                ]
-                for expire_index, expire_row in entity_matches.iterrows():
-                    if expire_index in used_expire_indices:
-                        continue
-                    matched_index = expire_index
-                    end_tick = int(expire_row["tick"])
-                    break
-            if matched_index is None and not expires.empty:
-                generic_matches = expires[expires["tick"] >= start_tick]
-                for expire_index, expire_row in generic_matches.iterrows():
-                    if expire_index in used_expire_indices:
-                        continue
-                    matched_index = expire_index
-                    end_tick = int(expire_row["tick"])
-                    break
-            if matched_index is not None:
-                used_expire_indices.add(matched_index)
-            windows.append(
-                {
-                    "start_tick": start_tick,
-                    "end_tick": end_tick,
-                    "x": float(detonate["x"]),
-                    "y": float(detonate["y"]),
-                }
-            )
-        return windows
-
-    def _build_smoke_start_tick_by_entity(self) -> dict[int, int]:
-        if self.round_smoke_detonates.empty or "entityid" not in self.round_smoke_detonates.columns:
-            return {}
-        work = self.round_smoke_detonates[["entityid", "tick"]].copy()
-        work["entityid"] = pd.to_numeric(work["entityid"], errors="coerce")
-        work["tick"] = pd.to_numeric(work["tick"], errors="coerce")
-        work = work.dropna(subset=["entityid", "tick"])
-        if work.empty:
-            return {}
-        work = work.sort_values(["entityid", "tick"]).drop_duplicates("entityid", keep="first")
-        return {
-            int(row["entityid"]): int(row["tick"])
-            for _, row in work.iterrows()
-        }
-
-    def _build_flash_effects(self) -> list[dict[str, float | int]]:
-        if self.round_flash_detonates.empty:
-            return []
-        required = {"tick", "x", "y"}
-        if not required.issubset(self.round_flash_detonates.columns):
-            return []
-        effects: list[dict[str, float | int]] = []
-        for _, detonate in self.round_flash_detonates.iterrows():
-            if pd.isna(detonate.get("x")) or pd.isna(detonate.get("y")):
-                continue
-            entity_id = pd.to_numeric(detonate.get("entityid"), errors="coerce")
-            effects.append(
-                {
-                    "entityid": -1 if pd.isna(entity_id) else int(entity_id),
-                    "start_tick": int(detonate["tick"]),
-                    "end_tick": int(detonate["tick"]) + FLASH_EFFECT_TICKS,
-                    "x": float(detonate["x"]),
-                    "y": float(detonate["y"]),
-                }
-            )
-        return effects
-
-    def _build_flash_start_tick_by_entity(self) -> dict[int, int]:
-        if self.round_flash_detonates.empty or "entityid" not in self.round_flash_detonates.columns:
-            return {}
-        work = self.round_flash_detonates[["entityid", "tick"]].copy()
-        work["entityid"] = pd.to_numeric(work["entityid"], errors="coerce")
-        work["tick"] = pd.to_numeric(work["tick"], errors="coerce")
-        work = work.dropna(subset=["entityid", "tick"])
-        if work.empty:
-            return {}
-        work = work.sort_values(["entityid", "tick"]).drop_duplicates("entityid", keep="first")
-        return {
-            int(row["entityid"]): int(row["tick"])
-            for _, row in work.iterrows()
-        }
-
-    def _build_he_effects(self) -> list[dict[str, float | int]]:
-        if self.round_he_detonates.empty:
-            return []
-        required = {"tick", "x", "y"}
-        if not required.issubset(self.round_he_detonates.columns):
-            return []
-        effects: list[dict[str, float | int]] = []
-        for _, detonate in self.round_he_detonates.iterrows():
-            if pd.isna(detonate.get("x")) or pd.isna(detonate.get("y")):
-                continue
-            entity_id = pd.to_numeric(detonate.get("entityid"), errors="coerce")
-            effects.append(
-                {
-                    "entityid": -1 if pd.isna(entity_id) else int(entity_id),
-                    "start_tick": int(detonate["tick"]),
-                    "end_tick": int(detonate["tick"]) + HE_EFFECT_TICKS,
-                    "x": float(detonate["x"]),
-                    "y": float(detonate["y"]),
-                }
-            )
-        return effects
-
-    def _smoke_extinguish_tick_for_point(self, x: float, y: float, inferno_start_tick: int, inferno_end_tick: int) -> int | None:
-        if not self.smoke_windows:
-            return None
-        for smoke in self.smoke_windows:
-            smoke_start_tick = int(smoke["start_tick"]) + SMOKE_DEPLOY_TICKS
-            smoke_end_tick = int(smoke["end_tick"])
-            if smoke_end_tick < inferno_start_tick or smoke_start_tick > inferno_end_tick:
-                continue
-            smoke_x = float(smoke["x"])
-            smoke_y = float(smoke["y"])
-            if (smoke_x - x) ** 2 + (smoke_y - y) ** 2 <= SMOKE_RADIUS_WORLD ** 2:
-                return max(inferno_start_tick, smoke_start_tick)
-        return None
-
-    def _build_inferno_effects(self) -> list[dict[str, object]]:
-        if self.round_inferno_starts.empty:
-            return []
-        effects: list[dict[str, object]] = []
-        duration_ticks = int(round(self.tickrate * INFERNO_DURATION_SECONDS))
-        for _, row in self.round_inferno_starts.iterrows():
-            if pd.isna(row.get("x")) or pd.isna(row.get("y")):
-                continue
-            player_name = str(row.get("user_name", ""))
-            steamid_value = row.get("user_steamid")
-            steamid = None if pd.isna(steamid_value) else str(steamid_value)
-            start_tick = int(row["tick"])
-            team_num = self._lookup_player_team_num(player_name, steamid, start_tick)
-            full_radius_world = INFERNO_CT_RADIUS_WORLD if team_num == 3 else INFERNO_T_RADIUS_WORLD
-            entity_id = pd.to_numeric(row.get("entityid"), errors="coerce")
-            seed = int(entity_id) if not pd.isna(entity_id) else start_tick
-            natural_end_tick = start_tick + duration_ticks
-            extinguish_tick = self._smoke_extinguish_tick_for_point(
-                float(row["x"]),
-                float(row["y"]),
-                start_tick,
-                natural_end_tick,
-            )
-            if extinguish_tick is not None:
-                end_tick = min(natural_end_tick, extinguish_tick)
-                tiles: list[dict[str, float | int | str]] = []
-            else:
-                end_tick = natural_end_tick
-                tiles = self._build_inferno_tiles(seed, full_radius_world)
-                for tile in tiles:
-                    tile_x = float(row["x"]) + float(tile["offset_x"])
-                    tile_y = float(row["y"]) + float(tile["offset_y"])
-                    tile_extinguish_tick = self._smoke_extinguish_tick_for_point(tile_x, tile_y, start_tick, end_tick)
-                    tile["extinguish_tick"] = tile_extinguish_tick
-            effects.append(
-                {
-                    "entityid": -1 if pd.isna(entity_id) else int(entity_id),
-                    "start_tick": start_tick,
-                    "end_tick": end_tick,
-                    "x": float(row["x"]),
-                    "y": float(row["y"]),
-                    "team_num": team_num,
-                    "full_radius_world": full_radius_world,
-                    "extinguish_tick": extinguish_tick,
-                    "tiles": tiles,
-                }
-            )
-        return effects
-
-    def _build_inferno_tiles(self, seed: int, full_radius_world: float) -> list[dict[str, float | int | str]]:
-        rng = random.Random(seed)
-        tiles: list[dict[str, float | int | str]] = []
-        layer_specs = [
-            ("01", 28, 0.36, 1.02, 0.08, 0.98),
-            ("02", 16, 0.24, 0.94, 0.00, 0.86),
-        ]
-        for layer_name, count, min_scale, max_scale, min_ring, max_ring in layer_specs:
-            for _ in range(count):
-                theta = rng.random() * math.tau
-                radius = full_radius_world * (min_ring + (max_ring - min_ring) * math.sqrt(rng.random()))
-                jitter = full_radius_world * 0.10
-                offset_x = math.cos(theta) * radius + rng.uniform(-jitter, jitter)
-                offset_y = math.sin(theta) * radius + rng.uniform(-jitter, jitter)
-                tiles.append(
-                    {
-                        "layer": layer_name,
-                        "offset_x": offset_x,
-                        "offset_y": offset_y,
-                        "scale": rng.uniform(min_scale, max_scale),
-                        "phase": rng.randrange(5),
-                    }
-                )
-        return tiles
-
-    def _build_smoke_holes_by_window(self) -> dict[int, list[dict[str, float | int]]]:
-        if not self.smoke_windows or not self.he_effects:
-            return {}
-        smoke_radius = SMOKE_RADIUS_WORLD
-        he_radius = HE_RADIUS_WORLD
-        holes_by_window: dict[int, list[dict[str, float | int]]] = {}
-        for index, smoke in enumerate(self.smoke_windows):
-            smoke_start_tick = int(smoke["start_tick"])
-            smoke_end_tick = int(smoke["end_tick"])
-            smoke_x = float(smoke["x"])
-            smoke_y = float(smoke["y"])
-            for effect in self.he_effects:
-                effect_tick = int(effect["start_tick"])
-                if effect_tick < smoke_start_tick or effect_tick > smoke_end_tick:
-                    continue
-                dx = float(effect["x"]) - smoke_x
-                dy = float(effect["y"]) - smoke_y
-                if dx * dx + dy * dy > (smoke_radius + he_radius) ** 2:
-                    continue
-                holes_by_window.setdefault(index, []).append(
-                    {
-                        "start_tick": effect_tick,
-                        "x": float(effect["x"]),
-                        "y": float(effect["y"]),
-                    }
-                )
-        return holes_by_window
+        return frame.team_num
 
     def _get_soft_circle_mask(self, radius_px: int, inner_alpha: int) -> pygame.Surface:
         key = (radius_px, inner_alpha)
@@ -711,59 +414,24 @@ class PygameRoundRenderer:
             "defused": self._tint_icon(base, C4_DEFUSED_COLOR),
         }
 
-    def _build_defuse_attempts(self) -> list[dict[str, object]]:
-        if self.round_bomb_begin_defuses.empty:
-            return []
-        attempts: list[dict[str, object]] = []
-        aborts = self.round_bomb_abort_defuses.copy() if not self.round_bomb_abort_defuses.empty else pd.DataFrame()
-        defuses = self.round_bomb_defuses.copy() if not self.round_bomb_defuses.empty else pd.DataFrame()
-        used_abort_indices: set[int] = set()
-        used_defuse_indices: set[int] = set()
-        for _, begin in self.round_bomb_begin_defuses.iterrows():
-            start_tick = int(begin["tick"])
-            haskit = bool(begin.get("haskit", False))
-            duration_ticks = int(round((5.0 if haskit else 10.0) * self.tickrate))
-            success_row = None
-            abort_row = None
-            if not defuses.empty:
-                future_defuses = defuses[defuses["tick"] >= start_tick]
-                for idx, row in future_defuses.iterrows():
-                    if idx in used_defuse_indices:
-                        continue
-                    success_row = row
-                    used_defuse_indices.add(idx)
-                    break
-            if not aborts.empty:
-                future_aborts = aborts[aborts["tick"] >= start_tick]
-                for idx, row in future_aborts.iterrows():
-                    if idx in used_abort_indices:
-                        continue
-                    abort_row = row
-                    used_abort_indices.add(idx)
-                    break
-            success_tick = int(success_row["tick"]) if success_row is not None else None
-            abort_tick = int(abort_row["tick"]) if abort_row is not None else None
-            natural_end_tick = start_tick + duration_ticks
-            end_tick = natural_end_tick
-            status = "active"
-            if success_tick is not None and success_tick <= natural_end_tick and (abort_tick is None or success_tick <= abort_tick):
-                end_tick = success_tick
-                status = "success"
-            elif abort_tick is not None and abort_tick <= natural_end_tick:
-                end_tick = abort_tick
-                status = "aborted"
-            attempts.append(
-                {
-                    "player": str(begin.get("user_name", "")),
-                    "start_tick": start_tick,
-                    "end_tick": end_tick,
-                    "natural_end_tick": natural_end_tick,
-                    "duration_ticks": duration_ticks,
-                    "haskit": haskit,
-                    "status": status,
-                }
-            )
-        return attempts
+    def _load_sound_toggle_icons(self) -> dict[str, pygame.Surface]:
+        icons: dict[str, pygame.Surface] = {}
+        for key, filename in (("sound_on", "ui/sound_on.png"), ("sound_off", "ui/sound_off.png")):
+            icon_path = resolve_asset_path(filename)
+            if not icon_path.exists():
+                continue
+            try:
+                icon = pygame.image.load(str(icon_path)).convert_alpha()
+            except pygame.error:
+                continue
+            width, height = icon.get_size()
+            if width <= 0 or height <= 0:
+                continue
+            target_height = 19
+            scale = target_height / height
+            scaled_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+            icons[key] = pygame.transform.smoothscale(icon, scaled_size)
+        return icons
 
     def _tint_icon(self, base: pygame.Surface, color: tuple[int, int, int]) -> pygame.Surface:
         tinted = base.copy()
@@ -902,14 +570,17 @@ class PygameRoundRenderer:
         self._draw_flash_effects(surface, frame_tick)
         self._draw_he_effects(surface, frame_tick)
         self._draw_ground_bomb(surface, frame_tick)
+        if self.show_sound_effects:
+            self._draw_sound_events(surface, frame_tick)
 
-        frame_slice = self.round_ticks[self.round_ticks["tick"] <= frame_tick]
         for player in self.players:
-            player_hist = frame_slice[frame_slice["name"] == player].sort_values("tick")
-            if player_hist.empty:
+            timeline = self._player_timeline(player)
+            if timeline is None:
                 continue
-            current = player_hist.iloc[-1]
-            base_color = team_color(current.get("team_num"))
+            current = timeline.frame_at(frame_tick)
+            if current is None:
+                continue
+            base_color = team_color(current.team_num)
             if self._is_dead(player, frame_tick):
                 self._draw_death_marker(surface, player, frame_tick, base_color)
                 death_position = self._death_position(player, frame_tick)
@@ -920,25 +591,26 @@ class PygameRoundRenderer:
 
             color = self._resolve_player_color(player, frame_tick, base_color)
             blind_strength = self._blind_effect_strength(player, frame_tick)
-            tail = player_hist.tail(self.trail)
+            tail = timeline.frames_between(max(self.round_start_tick, frame_tick - self.trail + 1), frame_tick)
             tail_points = [self.world_to_px(float(row.X), float(row.Y)) for row in tail.itertuples()]
             if len(tail_points) >= 2:
                 pygame.draw.lines(surface, color, False, tail_points, 3)
-            self._draw_facing_wedge(surface, float(current["X"]), float(current["Y"]), float(current["yaw"]), color)
+            self._draw_facing_wedge(surface, current.x, current.y, current.yaw, color)
             self._draw_player(
                 surface,
-                float(current["X"]),
-                float(current["Y"]),
-                float(current["yaw"]),
+                current.x,
+                current.y,
+                current.yaw,
                 player,
                 color,
                 base_color,
-                current.get("team_num"),
+                current.team_num,
                 frame_tick,
                 blind_strength,
             )
             self._draw_tracer_and_flash(surface, player, current, frame_tick)
             self._draw_death_marker(surface, player, frame_tick, base_color)
+        self._draw_plant_attempts(surface, frame_tick)
         return surface
 
     def _draw_grid(self, surface: pygame.Surface) -> None:
@@ -1020,11 +692,13 @@ class PygameRoundRenderer:
         surface.blit(overlay, (0, 0))
 
     def _draw_death_marker(self, surface: pygame.Surface, player: str, frame_tick: int, color: tuple[int, int, int]) -> None:
-        shown = [row for row in self.death_lookup.get(player, []) if int(row["tick"]) <= frame_tick]
-        if not shown:
+        timeline = self._player_timeline(player)
+        if timeline is None:
             return
-        death_row = shown[0]
-        px, py = self.world_to_px(float(death_row["user_X"]), float(death_row["user_Y"]))
+        position = timeline.death_position_at(frame_tick)
+        if position is None:
+            return
+        px, py = self.world_to_px(float(position[0]), float(position[1]))
         size = 5
         stroke_width = 2
         shadow_color = (18, 18, 18)
@@ -1047,59 +721,55 @@ class PygameRoundRenderer:
         pygame.draw.lines(surface, color, False, points_b, stroke_width)
 
     def _death_position(self, player: str, frame_tick: int) -> tuple[float, float] | None:
-        shown = [row for row in self.death_lookup.get(player, []) if int(row["tick"]) <= frame_tick]
-        if not shown:
+        timeline = self._player_timeline(player)
+        if timeline is None:
             return None
-        death_row = shown[0]
-        return self.world_to_px(float(death_row["user_X"]), float(death_row["user_Y"]))
+        position = timeline.death_position_at(frame_tick)
+        if position is None:
+            return None
+        return self.world_to_px(float(position[0]), float(position[1]))
 
     def _draw_grenades(self, surface: pygame.Surface, frame_tick: int) -> None:
-        if not self.grenade_trails:
+        if not self.utility_timeline.has_grenade_trails():
             return
         overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        for trail in self.grenade_trails:
-            current = trail[trail["tick"] == frame_tick]
+        for trail in self.utility_timeline.iter_grenade_trails():
+            points = trail.points
+            current = points[points["tick"] == frame_tick]
             if current.empty:
                 continue
             current_row = current.iloc[-1]
-            recent = trail[(trail["tick"] <= frame_tick) & (trail["tick"] >= frame_tick - 8)].copy()
+            recent = points[(points["tick"] <= frame_tick) & (points["tick"] >= frame_tick - 8)].copy()
             if recent.empty:
                 continue
-            style = GRENADE_TYPE_STYLES.get(str(current_row["grenade_type"]), {"color": (220, 220, 220), "radius": 4})
-            points = [
+            style = GRENADE_TYPE_STYLES.get(str(trail.grenade_type), {"color": (220, 220, 220), "radius": 4})
+            line_points = [
                 self.world_to_px(float(row["x"]), float(row["y"]))
                 for _, row in recent.iterrows()
             ]
-            if len(points) >= 2:
-                pygame.draw.lines(overlay, style["color"] + (110,), False, points, 2)
+            if len(line_points) >= 2:
+                pygame.draw.lines(overlay, style["color"] + (110,), False, line_points, 2)
             px, py = self.world_to_px(float(current_row["x"]), float(current_row["y"]))
-            grenade_type = str(current_row["grenade_type"])
+            grenade_type = str(trail.grenade_type)
             if grenade_type == "CSmokeGrenadeProjectile":
                 entity_id = pd.to_numeric(current_row.get("grenade_entity_id"), errors="coerce")
                 if not pd.isna(entity_id):
-                    smoke_start_tick = self.smoke_start_tick_by_entity.get(int(entity_id))
+                    smoke_start_tick = self.utility_timeline.smoke_start_tick_for_entity(int(entity_id))
                     if smoke_start_tick is not None and frame_tick >= smoke_start_tick + SMOKE_DEPLOY_TICKS:
                         continue
             if grenade_type == "CFlashbangProjectile":
                 entity_id = pd.to_numeric(current_row.get("grenade_entity_id"), errors="coerce")
                 if not pd.isna(entity_id):
-                    flash_start_tick = self.flash_start_tick_by_entity.get(int(entity_id))
+                    flash_start_tick = self.utility_timeline.flash_start_tick_for_entity(int(entity_id))
                     if flash_start_tick is not None and frame_tick >= flash_start_tick:
                         continue
             if grenade_type == "CHEGrenadeProjectile":
                 entity_id = pd.to_numeric(current_row.get("grenade_entity_id"), errors="coerce")
                 if not pd.isna(entity_id):
-                    he_effect = next(
-                        (
-                            effect
-                            for effect in self.he_effects
-                            if pd.to_numeric(effect.get("entityid"), errors="coerce") == int(entity_id)
-                        ),
-                        None,
-                    )
-                    if he_effect is not None and frame_tick >= int(he_effect["start_tick"]):
+                    he_effect = self.utility_timeline.he_effect_for_entity(int(entity_id))
+                    if he_effect is not None and frame_tick >= int(he_effect.start_tick):
                         continue
-            icon_key = current_row.get("burn_icon_path")
+            icon_key = trail.burn_icon_path
             if pd.isna(icon_key) or not icon_key:
                 icon_key = grenade_type
             icon = self.grenade_icons.get(str(icon_key))
@@ -1111,18 +781,175 @@ class PygameRoundRenderer:
                 pygame.draw.circle(surface, (20, 20, 20), (int(round(px)), int(round(py))), int(style["radius"]), 1)
         surface.blit(overlay, (0, 0))
 
+    def _draw_sound_events(self, surface: pygame.Surface, frame_tick: int) -> None:
+        if self.round_sound_events.empty:
+            return
+        active = self.round_sound_events[
+            (self.round_sound_events["tick"] <= frame_tick)
+            & ((self.round_sound_events["tick"] + self.round_sound_events["duration_ticks"]) > frame_tick)
+        ].copy()
+        if active.empty:
+            return
+        active["draw_priority"] = active["sound_kind"].map(
+            lambda kind: SOUND_STYLE_BY_KIND.get(str(kind), {}).get("priority", 0)
+        )
+        active = active.sort_values(["draw_priority", "tick", "sound_kind"], kind="stable")
+        overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        kept_rings: list[tuple[str, float, float, int]] = []
+        for sound in active.itertuples(index=False):
+            center = self._sound_center_px(sound)
+            if center is None:
+                continue
+            px, py = center
+            radius_px, alpha, ring_width, is_capped, label = self._sound_visual_state(sound, frame_tick)
+            if radius_px < 4 or alpha <= 0:
+                continue
+            emitter_key = self._sound_emitter_key(sound)
+            if self._sound_ring_is_suppressed(emitter_key, px, py, radius_px, kept_rings):
+                continue
+            style = SOUND_STYLE_BY_KIND.get(str(sound.sound_kind), {"color": (210, 210, 210), "label": None})
+            color = style["color"]
+            fill_alpha_mult = float(style.get("fill_alpha_mult", 1.0))
+            ring = self._get_sound_ring_surface(radius_px, color, alpha, ring_width, fill_alpha_mult)
+            rect = ring.get_rect(center=(int(round(px)), int(round(py))))
+            overlay.blit(ring, rect)
+            kept_rings.append((emitter_key, px, py, radius_px))
+            if is_capped:
+                marker = label or style.get("label") or "MAP"
+                self._draw_sound_cap_label(overlay, px, py, radius_px, marker, color, alpha)
+        surface.blit(overlay, (0, 0))
+
+    def _sound_ring_is_suppressed(
+        self,
+        emitter_key: str,
+        px: float,
+        py: float,
+        radius_px: int,
+        kept_rings: list[tuple[str, float, float, int]],
+    ) -> bool:
+        if not emitter_key:
+            return False
+        for kept_emitter_key, kept_x, kept_y, kept_radius in kept_rings:
+            if kept_emitter_key != emitter_key:
+                continue
+            dx = kept_x - px
+            dy = kept_y - py
+            if dx * dx + dy * dy > SOUND_SUPPRESSION_DISTANCE_PX ** 2:
+                continue
+            if kept_radius > radius_px:
+                return True
+        return False
+
+    def _sound_emitter_key(self, sound) -> str:
+        grenade_entity_id = pd.to_numeric(getattr(sound, "grenade_entity_id", np.nan), errors="coerce")
+        if pd.notna(grenade_entity_id):
+            return f"grenade:{int(grenade_entity_id)}"
+        steamid = str(getattr(sound, "emitter_steamid", "") or "").strip()
+        if steamid and steamid.lower() != "nan":
+            return f"steamid:{steamid}"
+        name = str(getattr(sound, "emitter_name", "") or "").strip()
+        if name and name.lower() != "nan":
+            return f"name:{name}"
+        return ""
+
+    def _sound_center_px(self, sound) -> tuple[float, float] | None:
+        x = pd.to_numeric(getattr(sound, "x", np.nan), errors="coerce")
+        y = pd.to_numeric(getattr(sound, "y", np.nan), errors="coerce")
+        if pd.isna(x) or pd.isna(y):
+            return None
+        return self.world_to_px(float(x), float(y))
+
+    def _sound_visual_state(self, sound, frame_tick: int) -> tuple[int, int, int, bool, str | None]:
+        start_tick = int(getattr(sound, "tick"))
+        duration_ticks = max(1, int(pd.to_numeric(getattr(sound, "duration_ticks", 1), errors="coerce")))
+        elapsed = frame_tick - start_tick
+        progress = max(0.0, min(1.0, elapsed / duration_ticks))
+        fade_in_ticks = max(1, min(SOUND_START_EXPAND_TICKS, duration_ticks))
+        fade_out_ticks = max(1, min(SOUND_END_SHRINK_TICKS, duration_ticks))
+        alpha_scale = 1.0
+        if elapsed < fade_in_ticks:
+            alpha_scale = min(alpha_scale, (elapsed + 1) / fade_in_ticks)
+        remaining = duration_ticks - elapsed
+        if remaining <= fade_out_ticks:
+            alpha_scale = min(alpha_scale, max(0.0, remaining / fade_out_ticks))
+
+        scale = 1.0
+        if elapsed < fade_in_ticks:
+            t = (elapsed + 1) / fade_in_ticks
+            scale = 0.92 + 0.08 * t
+        elif remaining <= fade_out_ticks:
+            t = max(0.0, remaining / fade_out_ticks)
+            scale = 0.96 + 0.04 * t
+
+        radius_world = float(pd.to_numeric(getattr(sound, "radius_world", np.nan), errors="coerce"))
+        raw_radius_px = self.world_dist_to_px(radius_world) * scale if pd.notna(radius_world) else 0.0
+        max_radius_px = max(24.0, min(self.width, self.height) * SOUND_MAX_DISPLAY_RADIUS_RATIO)
+        is_capped = raw_radius_px > max_radius_px
+        radius_px = int(round(min(raw_radius_px, max_radius_px)))
+        base_alpha = SOUND_BASE_ALPHA + (SOUND_GLOBAL_ALPHA_BOOST if is_capped else 0)
+        style = SOUND_STYLE_BY_KIND.get(str(getattr(sound, "sound_kind", "")), {})
+        alpha_mult = float(style.get("alpha_mult", 1.0))
+        display_radius_mult = float(style.get("display_radius_mult", 1.0))
+        radius_px = int(round(radius_px * display_radius_mult))
+        alpha = max(0, min(255, int(round(base_alpha * alpha_scale * alpha_mult))))
+        ring_width = int(style.get("ring_width", SOUND_RING_WIDTH)) + (1 if is_capped else 0)
+        label = "MAP" if is_capped else None
+        return radius_px, alpha, ring_width, is_capped, label
+
+    def _get_sound_ring_surface(
+        self,
+        radius_px: int,
+        color: tuple[int, int, int],
+        alpha: int,
+        ring_width: int,
+        fill_alpha_mult: float,
+    ) -> pygame.Surface:
+        key = (radius_px, alpha, color, ring_width, round(fill_alpha_mult, 3))
+        cached = self.sound_ring_cache.get(key)
+        if cached is not None:
+            return cached
+        diameter = max(4, radius_px * 2 + ring_width * 4)
+        surface = pygame.Surface((diameter, diameter), pygame.SRCALPHA)
+        center = diameter // 2
+        fill_alpha = max(0, min(255, int(round(alpha * (SOUND_FILL_ALPHA / max(1, SOUND_BASE_ALPHA)) * fill_alpha_mult))))
+        if fill_alpha > 0:
+            pygame.draw.circle(surface, color + (fill_alpha,), (center, center), radius_px)
+        pygame.draw.circle(surface, color + (alpha,), (center, center), radius_px, ring_width)
+        inner_radius = max(0, radius_px - ring_width - 1)
+        if inner_radius > 0:
+            pygame.draw.circle(surface, (255, 255, 255, min(60, alpha // 3)), (center, center), inner_radius, 1)
+        self.sound_ring_cache[key] = surface
+        return surface
+
+    def _draw_sound_cap_label(
+        self,
+        surface: pygame.Surface,
+        px: float,
+        py: float,
+        radius_px: int,
+        label: str,
+        color: tuple[int, int, int],
+        alpha: int,
+    ) -> None:
+        text = self.small_font.render(label, True, color)
+        shadow = self.small_font.render(label, True, (12, 12, 12))
+        text.set_alpha(alpha)
+        shadow.set_alpha(max(0, min(255, alpha)))
+        rect = text.get_rect(midleft=(int(round(px + radius_px + SOUND_LABEL_DISTANCE_PX)), int(round(py))))
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            surface.blit(shadow, rect.move(dx, dy))
+        surface.blit(text, rect)
+
     def _draw_smokes(self, surface: pygame.Surface, frame_tick: int) -> None:
-        if not self.smoke_windows:
+        if not self.utility_timeline.has_smokes():
             return
         radius_px = max(8, int(round(self.world_dist_to_px(SMOKE_RADIUS_WORLD))))
         he_hole_radius_px = max(10, int(round(self.world_dist_to_px(HE_RADIUS_WORLD))))
         recovery_delay_ticks = int(round(self.tickrate * HE_SMOKE_HOLE_RECOVERY_DELAY_SECONDS))
         full_recovery_ticks = int(round(self.tickrate * HE_SMOKE_HOLE_FULL_RECOVERY_SECONDS))
-        for smoke_index, smoke in enumerate(self.smoke_windows):
-            start_tick = int(smoke["start_tick"])
-            end_tick = int(smoke["end_tick"])
-            if frame_tick < start_tick or frame_tick > end_tick:
-                continue
+        for smoke_index, smoke in self.utility_timeline.active_smoke_windows_at(frame_tick):
+            start_tick = int(smoke.start_tick)
+            end_tick = int(smoke.end_tick)
             fade_ticks = 16
             if frame_tick - start_tick < fade_ticks:
                 alpha_scale = (frame_tick - start_tick + 1) / fade_ticks
@@ -1132,20 +959,20 @@ class PygameRoundRenderer:
                 alpha_scale = 1.0
             growth_ticks = SMOKE_DEPLOY_TICKS
             growth_scale = min(1.0, max(0.35, (frame_tick - start_tick + 1) / growth_ticks))
-            px, py = self.world_to_px(float(smoke["x"]), float(smoke["y"]))
+            px, py = self.world_to_px(float(smoke.x), float(smoke.y))
             pulse = math.sin((frame_tick - start_tick) * SMOKE_PULSE_FREQUENCY) * SMOKE_PULSE_AMPLITUDE
             smoke_scale = max(0.2, (1.0 + pulse) * growth_scale)
             smoke_radius_px = max(1, int(round(radius_px * 1.02 * smoke_scale)))
             texture_size = smoke_radius_px * 2
             texture = pygame.transform.smoothscale(self.smoke_texture, (texture_size, texture_size)).copy()
-            smoke_holes = self.smoke_holes_by_window.get(smoke_index, [])
+            smoke_holes = self.utility_timeline.smoke_holes_for_window(smoke_index)
             if smoke_holes:
                 texture_scale = smoke_radius_px / max(1, radius_px)
                 scaled_hole_radius_px = max(1, int(round(he_hole_radius_px * texture_scale)))
                 hole_mask = pygame.Surface((texture_size, texture_size), pygame.SRCALPHA)
                 hole_mask.fill((255, 255, 255, 255))
-                smoke_center_x = float(smoke["x"])
-                smoke_center_y = float(smoke["y"])
+                smoke_center_x = float(smoke.x)
+                smoke_center_y = float(smoke.y)
                 for hole in smoke_holes:
                     hole_start_tick = int(hole["start_tick"])
                     if frame_tick < hole_start_tick:
@@ -1172,41 +999,36 @@ class PygameRoundRenderer:
             surface.blit(texture, rect)
 
     def _draw_infernos(self, surface: pygame.Surface, frame_tick: int) -> None:
-        if not self.inferno_effects or not self.fire_animation_layers:
+        if not self.utility_timeline.has_infernos() or not self.fire_animation_layers:
             return
         overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
         growth_ticks = max(1, int(round(self.tickrate * INFERNO_GROWTH_SECONDS)))
-        for effect in self.inferno_effects:
-            start_tick = int(effect["start_tick"])
-            end_tick = int(effect["end_tick"])
-            extinguish_tick = effect.get("extinguish_tick")
-            if frame_tick < start_tick or frame_tick > end_tick:
-                continue
-            if extinguish_tick is not None and frame_tick >= int(extinguish_tick):
-                continue
-            full_radius_world = float(effect["full_radius_world"])
+        for effect in self.utility_timeline.active_infernos_at(frame_tick):
+            start_tick = int(effect.start_tick)
+            end_tick = int(effect.end_tick)
+            full_radius_world = float(effect.full_radius_world)
             elapsed = frame_tick - start_tick
             growth_progress = min(1.0, max(0.0, elapsed / growth_ticks))
             current_radius_world = full_radius_world * (
                 INFERNO_INITIAL_RADIUS_SCALE + (1.0 - INFERNO_INITIAL_RADIUS_SCALE) * growth_progress
             )
-            center_x = float(effect["x"])
-            center_y = float(effect["y"])
+            center_x = float(effect.x)
+            center_y = float(effect.y)
             phase_tick = max(0, elapsed // 6)
-            for tile in effect["tiles"]:
-                tile_extinguish_tick = tile.get("extinguish_tick")
+            for tile in effect.tiles:
+                tile_extinguish_tick = tile.extinguish_tick
                 if tile_extinguish_tick is not None and frame_tick >= int(tile_extinguish_tick):
                     continue
-                tile_distance = math.sqrt(float(tile["offset_x"]) ** 2 + float(tile["offset_y"]) ** 2)
+                tile_distance = math.sqrt(float(tile.offset_x) ** 2 + float(tile.offset_y) ** 2)
                 if tile_distance > current_radius_world:
                     continue
-                layer_name = str(tile["layer"])
+                layer_name = str(tile.layer)
                 frames = self.fire_animation_layers.get(layer_name, [])
                 if not frames:
                     continue
-                phase = int(tile["phase"])
+                phase = int(tile.phase)
                 frame = frames[(phase_tick + phase) % len(frames)]
-                base_scale = float(tile["scale"])
+                base_scale = float(tile.scale)
                 world_scale = 0.72 + 0.28 * growth_progress
                 scaled_size = (
                     max(1, int(round(frame.get_width() * base_scale * world_scale))),
@@ -1219,37 +1041,37 @@ class PygameRoundRenderer:
                 else:
                     alpha = int(round(192 * max(0.30, 1.0 - norm * 0.60)))
                 sprite.set_alpha(max(0, min(255, alpha)))
-                px, py = self.world_to_px(center_x + float(tile["offset_x"]), center_y + float(tile["offset_y"]))
+                px, py = self.world_to_px(center_x + float(tile.offset_x), center_y + float(tile.offset_y))
                 rect = sprite.get_rect(center=(int(round(px)), int(round(py))))
                 overlay.blit(sprite, rect)
         surface.blit(overlay, (0, 0))
 
     def _draw_flash_effects(self, surface: pygame.Surface, frame_tick: int) -> None:
-        if not self.flash_effects:
+        if not self.utility_timeline.has_flashes():
             return
-        for flash in self.flash_effects:
-            start_tick = int(flash["start_tick"])
-            end_tick = int(flash["end_tick"])
+        for flash in self.utility_timeline.active_flashes_at(frame_tick):
+            start_tick = int(flash.start_tick)
+            end_tick = int(flash.end_tick)
             if frame_tick < start_tick or frame_tick > end_tick:
                 continue
             progress = (frame_tick - start_tick) / max(1, end_tick - start_tick)
             fade = max(0.0, 1.0 - progress)
-            px, py = self.world_to_px(float(flash["x"]), float(flash["y"]))
+            px, py = self.world_to_px(float(flash.x), float(flash.y))
             if self.flash_eye_texture is not None:
                 draw_flash_eye_texture(surface, self.flash_eye_texture, self.world_dist_to_px, px, py, fade)
             else:
                 draw_flash_eye(surface, self.width, self.height, self.world_dist_to_px, px, py, fade)
 
     def _draw_he_effects(self, surface: pygame.Surface, frame_tick: int) -> None:
-        if not self.he_effects or not self.he_animation_frames:
+        if not self.utility_timeline.has_he_effects() or not self.he_animation_frames:
             return
-        for effect in self.he_effects:
-            start_tick = int(effect["start_tick"])
-            end_tick = int(effect["end_tick"])
+        for effect in self.utility_timeline.active_he_bursts_at(frame_tick):
+            start_tick = int(effect.start_tick)
+            end_tick = int(effect.end_tick)
             if frame_tick < start_tick or frame_tick > end_tick:
                 continue
             progress = (frame_tick - start_tick) / max(1, end_tick - start_tick)
-            px, py = self.world_to_px(float(effect["x"]), float(effect["y"]))
+            px, py = self.world_to_px(float(effect.x), float(effect.y))
             frame_count = len(self.he_animation_frames)
             frame_index = min(frame_count - 1, max(0, int(progress * frame_count)))
             frame = self.he_animation_frames[frame_index].copy()
@@ -1257,26 +1079,32 @@ class PygameRoundRenderer:
             frame_rect = frame.get_rect(center=(int(round(px)), int(round(py))))
             surface.blit(frame, frame_rect)
 
-    def _bomb_state_at(self, frame_tick: int) -> dict[str, object] | None:
-        return self.bomb_tracker.state_at(frame_tick)
-
-    def _bomb_visual_state_at(self, frame_tick: int) -> dict[str, object] | None:
-        return self.bomb_tracker.visual_state_at(frame_tick)
-
     def _draw_ground_bomb(self, surface: pygame.Surface, frame_tick: int) -> None:
-        state = self._bomb_visual_state_at(frame_tick)
-        if state is None:
-            return
-        kind = str(state.get("state"))
+        kind = self.bomb_tracker.icon_state_at(frame_tick)
         if kind not in {"dropped", "planted", "defused"}:
             return
         icon = self.c4_icons.get(kind)
         if icon is None:
             return
-        px, py = self.world_to_px(float(state["x"]), float(state["y"]))
+        if kind == "dropped":
+            dropped_position = self.bomb_tracker.dropped_position_at(frame_tick)
+            if dropped_position is None:
+                return
+            px, py = self.world_to_px(*dropped_position)
+        else:
+            planted_position = self.bomb_tracker.planted_position_at(frame_tick) if kind == "planted" else None
+            if kind == "planted":
+                if planted_position is None:
+                    return
+                px, py = self.world_to_px(*planted_position)
+            else:
+                defused_position = self.bomb_tracker.defused_position_at(frame_tick)
+                if defused_position is None:
+                    return
+                px, py = self.world_to_px(*defused_position)
         center = (int(round(px)), int(round(py)))
         if kind == "planted":
-            self._draw_planted_bomb_timer(surface, center, frame_tick, state)
+            self._draw_planted_bomb_timer(surface, center, frame_tick)
             self._blit_icon_with_shadow(surface, icon, center)
             self._draw_defuse_progress(surface, center, frame_tick)
             return
@@ -1285,34 +1113,62 @@ class PygameRoundRenderer:
             return
         self._blit_icon_with_shadow(surface, icon, center)
 
+    def _draw_plant_attempts(self, surface: pygame.Surface, frame_tick: int) -> None:
+        visual = self.bomb_tracker.plant_attempt_visual_at(frame_tick)
+        if visual is None:
+            return
+        overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        icon = self.c4_icons.get("carried") or self.c4_icons.get("planted")
+        icon_radius = max(6, (icon.get_width() // 2) if icon is not None else 6)
+        ring_radius = max(icon_radius + 14, 22)
+        ring_width = 4
+        progress_color = (214, 126, 54)
+        track_color = (70, 42, 22)
+        fade = float(visual.fade)
+        center_x, center_y = self.world_to_px(float(visual.center_x), float(visual.center_y))
+        start_angle = float(visual.start_angle)
+        end_angle = float(visual.end_angle)
+        center = (int(round(center_x)), int(round(center_y)))
+        if icon is not None:
+            icon_alpha = max(0, min(255, int(round(255 * fade))))
+            icon_surface = icon.copy()
+            icon_surface.set_alpha(icon_alpha)
+            shadow = icon_surface.copy()
+            shadow.fill((18, 18, 18, 170), special_flags=pygame.BLEND_RGBA_MULT)
+            overlay.blit(shadow, shadow.get_rect(center=(center[0] + 1, center[1] + 1)))
+            overlay.blit(icon_surface, icon_surface.get_rect(center=center))
+        track_alpha = max(0, min(255, int(round(130 * fade))))
+        pygame.draw.circle(overlay, track_color + (track_alpha,), center, ring_radius, ring_width)
+        shadow_points = self._build_arc_segment_points(
+            center[0] + 1,
+            center[1] + 1,
+            ring_radius,
+            start_angle,
+            end_angle,
+        )
+        ring_points = self._build_arc_segment_points(
+            center[0],
+            center[1],
+            ring_radius,
+            start_angle,
+            end_angle,
+        )
+        shadow_alpha = max(0, min(255, int(round(170 * fade))))
+        ring_alpha = max(0, min(255, int(round(220 * fade))))
+        if len(shadow_points) >= 2:
+            pygame.draw.lines(overlay, (18, 18, 18, shadow_alpha), False, shadow_points, ring_width + 1)
+        if len(ring_points) >= 2:
+            pygame.draw.lines(overlay, progress_color + (ring_alpha,), False, ring_points, ring_width)
+        surface.blit(overlay, (0, 0))
+
     def _draw_defuse_progress(self, surface: pygame.Surface, center: tuple[int, int], frame_tick: int) -> None:
-        if not self.defuse_attempts:
+        visual = self.bomb_tracker.defuse_attempt_visual_at(frame_tick, abort_shake_ticks=DEFUSE_SHAKE_TICKS)
+        if visual is None:
             return
-        attempt = None
-        for item in self.defuse_attempts:
-            start_tick = int(item["start_tick"])
-            end_tick = int(item["end_tick"])
-            if start_tick <= frame_tick <= end_tick:
-                attempt = item
-                break
-            if str(item["status"]) == "aborted" and end_tick < frame_tick <= end_tick + DEFUSE_SHAKE_TICKS:
-                attempt = item
-                break
-        if attempt is None:
-            return
-        start_tick = int(attempt["start_tick"])
-        end_tick = int(attempt["end_tick"])
-        duration_ticks = max(1, int(attempt["duration_ticks"]))
-        status = str(attempt["status"])
-        if status == "aborted" and frame_tick > end_tick:
-            progress = max(0.0, min(1.0, (end_tick - start_tick) / duration_ticks))
-            vanish_progress = (frame_tick - end_tick) / max(1, DEFUSE_SHAKE_TICKS)
-            alpha_scale = max(0.0, 1.0 - vanish_progress)
-            shake = math.sin(vanish_progress * math.pi * 4.0) * 4.0
-        else:
-            progress = max(0.0, min(1.0, (frame_tick - start_tick) / duration_ticks))
-            alpha_scale = 1.0
-            shake = 0.0
+        progress = float(visual.progress)
+        alpha_scale = float(visual.alpha_scale)
+        shake = float(visual.shake)
+        status = str(visual.status)
         if progress <= 0.0 and status != "aborted":
             return
         bar_width = 38
@@ -1341,10 +1197,8 @@ class PygameRoundRenderer:
         surface.blit(overlay, (0, 0))
 
     def _draw_carried_bomb_icon(self, surface: pygame.Surface, player: str, center: tuple[int, int], frame_tick: int) -> None:
-        state = self._bomb_visual_state_at(frame_tick)
-        if state is None or str(state.get("state")) != "carried":
-            return
-        if str(state.get("player")) != player:
+        carrier = self.bomb_tracker.carrier_at(frame_tick)
+        if carrier != player:
             return
         icon = self.c4_icons.get("carried")
         if icon is None:
@@ -1356,13 +1210,11 @@ class PygameRoundRenderer:
         surface: pygame.Surface,
         center: tuple[int, int],
         frame_tick: int,
-        state: dict[str, object],
     ) -> None:
-        start_tick = int(state.get("start_tick", frame_tick))
-        end_tick = int(state.get("end_tick", frame_tick))
-        total_ticks = max(1, end_tick - start_tick + 1)
-        elapsed_ticks = max(0, min(total_ticks, frame_tick - start_tick))
-        progress = elapsed_ticks / total_ticks
+        total_ticks = max(1, int(round(self.tickrate * BOMB_PLANTED_DURATION_SECONDS)))
+        progress = self.bomb_tracker.planted_timer_progress_at(frame_tick, total_ticks)
+        if progress is None:
+            return
         remaining_fraction = max(0.0, 1.0 - progress)
         if remaining_fraction <= 0.0:
             return
@@ -1387,14 +1239,29 @@ class PygameRoundRenderer:
         radius: int,
         remaining_fraction: float,
     ) -> list[tuple[int, int]]:
+        if remaining_fraction <= 0.0:
+            return []
         start_angle = -math.pi / 2
         visible_start = start_angle + (2 * math.pi * (1.0 - remaining_fraction))
         visible_end = start_angle + (2 * math.pi)
-        step_count = max(24, int(round(72 * remaining_fraction)))
+        return self._build_arc_segment_points(center_x, center_y, radius, visible_start, visible_end)
+
+    def _build_arc_segment_points(
+        self,
+        center_x: int,
+        center_y: int,
+        radius: int,
+        start_angle: float,
+        end_angle: float,
+    ) -> list[tuple[int, int]]:
+        angle_span = abs(end_angle - start_angle)
+        if angle_span <= 0.0:
+            return []
+        step_count = max(24, int(round(72 * (angle_span / (2 * math.pi)))))
         points: list[tuple[int, int]] = []
         for index in range(step_count + 1):
             t = index / step_count
-            angle = visible_start + (visible_end - visible_start) * t
+            angle = start_angle + (end_angle - start_angle) * t
             points.append(
                 (
                     int(round(center_x + math.cos(angle) * radius)),
@@ -1404,15 +1271,13 @@ class PygameRoundRenderer:
         return points
 
     def _smoke_is_active_at(self, px: float, py: float, frame_tick: int) -> bool:
-        for smoke in self.smoke_windows:
-            if frame_tick < int(smoke["start_tick"]) or frame_tick > int(smoke["end_tick"]):
-                continue
-            smoke_px, smoke_py = self.world_to_px(float(smoke["x"]), float(smoke["y"]))
+        for smoke in self.utility_timeline.active_smokes_at(frame_tick):
+            smoke_px, smoke_py = self.world_to_px(float(smoke.x), float(smoke.y))
             if (smoke_px - px) ** 2 + (smoke_py - py) ** 2 <= self.world_dist_to_px(SMOKE_RADIUS_WORLD) ** 2:
                 return True
         return False
 
-    def _draw_tracer_and_flash(self, surface: pygame.Surface, player: str, current: pd.Series, frame_tick: int) -> None:
+    def _draw_tracer_and_flash(self, surface: pygame.Surface, player: str, current: PlayerFrame, frame_tick: int) -> None:
         fire_event = self._latest_fire_event(player, frame_tick)
         if fire_event is None:
             return
@@ -1420,8 +1285,8 @@ class PygameRoundRenderer:
         elapsed = frame_tick - fire_tick
         if elapsed < 0 or elapsed > self.fire_flash_duration_ticks:
             return
-        px, py = self.world_to_px(float(current["X"]), float(current["Y"]))
-        yaw = float(current["yaw"])
+        px, py = self.world_to_px(current.x, current.y)
+        yaw = current.yaw
         muzzle_px, muzzle_py = self._offset_point(px, py, yaw, 8.0)
         self._draw_tracer_line(surface, fire_event, muzzle_px, muzzle_py, yaw)
         self._draw_muzzle_flash(surface, muzzle_px, muzzle_py, yaw, 1.0 - (elapsed / self.fire_flash_duration_ticks))
@@ -1466,26 +1331,20 @@ class PygameRoundRenderer:
         surface.blit(rotated, rect)
 
     def _latest_fire_event(self, player: str, frame_tick: int) -> pd.Series | None:
-        events = self.fire_lookup.get(player, [])
-        latest: pd.Series | None = None
-        for event in events:
-            if int(event["tick"]) > frame_tick:
-                break
-            latest = event
-        return latest
+        timeline = self._player_timeline(player)
+        if timeline is None:
+            return None
+        return timeline.latest_fire_event(frame_tick)
 
     def _resolve_hit_point(self, fire_event: pd.Series) -> tuple[float, float] | None:
-        attacker_name = str(fire_event.get("user_name", ""))
-        if not attacker_name:
+        attacker_timeline = self.round_players.get_by_steamid(str(fire_event.get("user_steamid", "")).strip())
+        if attacker_timeline is None:
+            attacker_timeline = self._player_timeline(str(fire_event.get("user_name", "")))
+        if attacker_timeline is None:
             return None
         fire_tick = int(fire_event["tick"])
-        hurts = self.hurt_lookup.get(attacker_name, [])
+        hurts = attacker_timeline.hurt_events_after(fire_tick, fire_tick + self.hit_match_window_ticks)
         for hurt in hurts:
-            hurt_tick = int(hurt["tick"])
-            if hurt_tick < fire_tick:
-                continue
-            if hurt_tick - fire_tick > self.hit_match_window_ticks:
-                break
             hit_xy = self._extract_hurt_world_xy(hurt)
             if hit_xy is not None:
                 return hit_xy
@@ -1496,18 +1355,14 @@ class PygameRoundRenderer:
         if pd.isna(victim_name):
             return None
         hurt_tick = int(hurt_event["tick"])
-        victim_rows = self.round_ticks[
-            (self.round_ticks["name"] == str(victim_name))
-            & (self.round_ticks["tick"] <= hurt_tick)
-        ].sort_values("tick")
-        if victim_rows.empty:
+        frame = self._player_frame(str(victim_name), hurt_tick)
+        if frame is None:
             return None
-        victim_row = victim_rows.iloc[-1]
-        return (float(victim_row["X"]), float(victim_row["Y"]))
+        return (frame.x, frame.y)
 
     def _is_dead(self, player: str, frame_tick: int) -> bool:
-        death_tick = self.death_tick_lookup.get(player)
-        return death_tick is not None and frame_tick >= death_tick
+        timeline = self._player_timeline(player)
+        return timeline is not None and not timeline.is_alive_at(frame_tick)
 
     def _resolve_player_color(self, player: str, frame_tick: int, base_color: tuple[int, int, int]) -> tuple[int, int, int]:
         color = base_color
@@ -1527,16 +1382,16 @@ class PygameRoundRenderer:
         return color
 
     def _latest_damage_flash(self, player: str, frame_tick: int) -> tuple[int, float] | None:
-        flashes = self.damage_flash_lookup.get(player, [])
-        latest: tuple[int, float] | None = None
-        for damage_tick, damage in flashes:
-            if damage_tick > frame_tick:
-                break
-            latest = (damage_tick, damage)
-        return latest
+        timeline = self._player_timeline(player)
+        if timeline is None:
+            return None
+        return timeline.latest_damage_flash(frame_tick)
 
     def _blind_effect_strength(self, player: str, frame_tick: int) -> float:
-        return self.blind_tracker.strength_at(player, frame_tick)
+        timeline = self._player_timeline(player)
+        if timeline is None:
+            return 0.0
+        return timeline.blind_strength_at(frame_tick)
 
     def _offset_point(self, px: float, py: float, yaw: float, distance: float) -> tuple[float, float]:
         radians = math.radians(-yaw)
@@ -1565,12 +1420,14 @@ class PygameRoundViewer:
             self.fires,
             self.hurts,
             self.hits,
+            self.footsteps,
             self.smoke_detonates,
             self.flash_detonates,
             self.he_detonates,
             self.blinds,
             self.bomb_pickups,
             self.bomb_drops,
+            self.bomb_begin_plants,
             self.bomb_plants,
             self.bomb_defuses,
             self.bomb_begin_defuses,
@@ -1579,6 +1436,7 @@ class PygameRoundViewer:
             self.smoke_expires,
             self.inferno_starts,
             self.grenades,
+            self.sound_events,
             self.inferred_rounds,
             self.metadata,
         ) = load_round_data(data_dir)
@@ -1595,12 +1453,14 @@ class PygameRoundViewer:
         self.current_frame_index = 0
         self.current_playback_tick = 0.0
         self.playing = False
+        self.show_sound_effects = True
         self.dragging_timeline = False
         self.dragging_round_scroll = False
         self.max_cached_frames = 240
         self.speed_index = SPEED_OPTIONS.index(1.0)
         self.font = pygame.font.SysFont("segoe ui", 18)
         self.small_font = pygame.font.SysFont("segoe ui", 14)
+        self.sound_toggle_icons = self._load_viewer_sound_toggle_icons()
         self.button_rects: dict[str, pygame.Rect] = {}
         self.round_item_rects: dict[int, pygame.Rect] = {}
         self.speed_rects: dict[float, pygame.Rect] = {}
@@ -1641,12 +1501,14 @@ class PygameRoundViewer:
             self.fires,
             self.hurts,
             self.hits,
+            self.footsteps,
             self.smoke_detonates,
             self.flash_detonates,
             self.he_detonates,
             self.blinds,
             self.bomb_pickups,
             self.bomb_drops,
+            self.bomb_begin_plants,
             self.bomb_plants,
             self.bomb_defuses,
             self.bomb_begin_defuses,
@@ -1655,6 +1517,7 @@ class PygameRoundViewer:
             self.smoke_expires,
             self.inferno_starts,
             self.grenades,
+            self.sound_events,
             round_id,
         )
         renderer = PygameRoundRenderer(
@@ -1668,6 +1531,7 @@ class PygameRoundViewer:
             round_blinds=round_data.round_blinds,
             round_bomb_pickups=round_data.round_bomb_pickups,
             round_bomb_drops=round_data.round_bomb_drops,
+            round_bomb_begin_plants=round_data.round_bomb_begin_plants,
             round_bomb_plants=round_data.round_bomb_plants,
             round_bomb_defuses=round_data.round_bomb_defuses,
             round_bomb_begin_defuses=round_data.round_bomb_begin_defuses,
@@ -1676,6 +1540,7 @@ class PygameRoundViewer:
             round_smoke_expires=round_data.round_smoke_expires,
             round_inferno_starts=round_data.round_inferno_starts,
             round_grenades=round_data.round_grenades,
+            round_sound_events=round_data.round_sound_events,
             player_numbers=self.player_numbers,
             width=self.map_width,
             height=self.map_height,
@@ -1685,6 +1550,7 @@ class PygameRoundViewer:
             map_name=self.metadata.get("derived", {}).get("map_name"),
             tickrate=self.tickrate,
         )
+        renderer.show_sound_effects = self.show_sound_effects
         frame_ticks = renderer.frame_ticks[:: self.frame_step]
         last_tick = renderer.frame_ticks[-1]
         if frame_ticks[-1] != last_tick:
@@ -1789,6 +1655,8 @@ class PygameRoundViewer:
             self._change_round(1)
         elif event.key == pygame.K_UP:
             self._change_round(-1)
+        elif event.key == pygame.K_m:
+            self._toggle_sound_effects()
         elif event.key in (pygame.K_MINUS, pygame.K_LEFTBRACKET):
             self._change_speed(-1)
         elif event.key in (pygame.K_EQUALS, pygame.K_RIGHTBRACKET):
@@ -1830,6 +1698,9 @@ class PygameRoundViewer:
             return
         if self.button_rects.get("next_round") and self.button_rects["next_round"].collidepoint(position):
             self._change_round(1)
+            return
+        if self.button_rects.get("sound_toggle") and self.button_rects["sound_toggle"].collidepoint(position):
+            self._toggle_sound_effects()
             return
         for speed_value, rect in self.speed_rects.items():
             if rect.collidepoint(position):
@@ -1915,6 +1786,38 @@ class PygameRoundViewer:
         if next_index != index:
             self.select_round(self.round_ids[next_index])
 
+    def _load_viewer_sound_toggle_icons(self) -> dict[str, pygame.Surface]:
+        icons: dict[str, pygame.Surface] = {}
+        for key, filename in (("sound_on", "ui/sound_on.png"), ("sound_off", "ui/sound_off.png")):
+            icon_path = resolve_asset_path(filename)
+            if not icon_path.exists():
+                continue
+            try:
+                icon = pygame.image.load(str(icon_path)).convert_alpha()
+            except pygame.error:
+                continue
+            width, height = icon.get_size()
+            if width <= 0 or height <= 0:
+                continue
+            target_height = 17
+            scale = target_height / height
+            scaled_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+            icons[key] = pygame.transform.smoothscale(icon, scaled_size)
+        return icons
+
+    def _tint_icon(self, base: pygame.Surface, color: tuple[int, int, int]) -> pygame.Surface:
+        tinted = base.copy()
+        tinted.fill((*color, 255), special_flags=pygame.BLEND_RGBA_MULT)
+        return tinted
+
+    def _toggle_sound_effects(self) -> None:
+        self.show_sound_effects = not self.show_sound_effects
+        if self.round_cache is None:
+            return
+        self.round_cache.renderer.show_sound_effects = self.show_sound_effects
+        self.round_cache.cache.clear()
+        self._ensure_cached(self.current_frame_index)
+
     def _draw_media_icon(self, rect: pygame.Rect, kind: str, color: tuple[int, int, int]) -> None:
         cx, cy = rect.center
         icon_height = 12
@@ -1936,6 +1839,34 @@ class PygameRoundViewer:
             right_bar = pygame.Rect(cx + 2, cy - half_height, 4, icon_height)
             pygame.draw.rect(self.screen, color, left_bar, border_radius=1)
             pygame.draw.rect(self.screen, color, right_bar, border_radius=1)
+        elif kind in {"sound_on", "sound_off"}:
+            icon = self.sound_toggle_icons.get(kind)
+            if icon is not None:
+                tinted = self._tint_icon(icon, color)
+                icon_rect = tinted.get_rect(center=rect.center)
+                self.screen.blit(tinted, icon_rect)
+            else:
+                body_rect = pygame.Rect(cx - 12, cy - 6, 6, 12)
+                pygame.draw.rect(self.screen, color, body_rect, border_radius=2)
+                cone_points = [(cx - 6, cy - 7), (cx + 3, cy - 13), (cx + 3, cy + 13), (cx - 6, cy + 7)]
+                pygame.draw.polygon(self.screen, color, cone_points, width=2)
+                if kind == "sound_on":
+                    for radius in (8, 13):
+                        arc_rect = pygame.Rect(cx - 1, cy - radius, radius * 2, radius * 2)
+                        pygame.draw.arc(
+                            self.screen,
+                            color,
+                            arc_rect,
+                            -0.75,
+                            0.75,
+                            2,
+                        )
+                else:
+                    inner_arc = pygame.Rect(cx - 1, cy - 8, 16, 16)
+                    outer_arc = pygame.Rect(cx - 1, cy - 13, 26, 26)
+                    pygame.draw.arc(self.screen, color, inner_arc, -0.75, 0.75, 2)
+                    pygame.draw.arc(self.screen, color, outer_arc, -0.75, 0.75, 2)
+                    pygame.draw.line(self.screen, color, (cx - 7, cy + 10), (cx + 15, cy - 12), 3)
         else:
             points = [(cx + 5, cy), (cx - 4, cy - half_height), (cx - 4, cy + half_height)]
             pygame.draw.polygon(self.screen, color, points)
@@ -2037,13 +1968,15 @@ class PygameRoundViewer:
             return
 
         button_gap = 8
-        button_width = (SIDEBAR_WIDTH - 32 - button_gap * 2) // 3
+        button_width = (SIDEBAR_WIDTH - 32 - button_gap * 3) // 4
         prev_rect = pygame.Rect(x, y, button_width, 32)
         play_rect = pygame.Rect(prev_rect.right + button_gap, y, button_width, 32)
         next_rect = pygame.Rect(play_rect.right + button_gap, y, button_width, 32)
+        sound_rect = pygame.Rect(next_rect.right + button_gap, y, button_width, 32)
         self.button_rects["prev_round"] = prev_rect
         self.button_rects["play"] = play_rect
         self.button_rects["next_round"] = next_rect
+        self.button_rects["sound_toggle"] = sound_rect
         prev_active = self.selected_round_id != self.round_ids[0]
         next_active = self.selected_round_id != self.round_ids[-1]
         icon_color = (214, 214, 214)
@@ -2051,9 +1984,11 @@ class PygameRoundViewer:
         pygame.draw.rect(self.screen, BUTTON_COLOR if prev_active else (42, 42, 42), prev_rect, border_radius=4)
         pygame.draw.rect(self.screen, BUTTON_ACTIVE_COLOR if self.playing else BUTTON_COLOR, play_rect, border_radius=4)
         pygame.draw.rect(self.screen, BUTTON_COLOR if next_active else (42, 42, 42), next_rect, border_radius=4)
+        pygame.draw.rect(self.screen, BUTTON_ACTIVE_COLOR if not self.show_sound_effects else BUTTON_COLOR, sound_rect, border_radius=4)
         self._draw_media_icon(prev_rect, "prev", icon_color if prev_active else inactive_icon)
         self._draw_media_icon(play_rect, "pause" if self.playing else "play", icon_color)
         self._draw_media_icon(next_rect, "next", icon_color if next_active else inactive_icon)
+        self._draw_media_icon(sound_rect, "sound_on" if self.show_sound_effects else "sound_off", icon_color)
         y += 48
 
         progress_text = self.small_font.render(f"Cached {len(self.round_cache.cache)} frames", True, MUTED_TEXT_COLOR)
@@ -2117,10 +2052,10 @@ class PygameRoundViewer:
     def _latest_team_num(self, player: str) -> int | float | None:
         if self.round_cache is None:
             return None
-        rows = self.round_cache.renderer.round_ticks[self.round_cache.renderer.round_ticks["name"] == player]
-        if rows.empty:
+        timeline = self.round_cache.renderer._player_timeline(player)
+        if timeline is None:
             return None
-        return rows.iloc[-1].get("team_num")
+        return timeline.team_at(self.round_cache.frame_ticks[-1])
 
     def _draw_bottom_bar(self) -> None:
         if self.round_cache is None:
