@@ -12,47 +12,6 @@
 
 也就是说，当前项目先聚焦“播放器”，不把“鉴挂”作为当前阶段主目标。
 
-## Current Architecture
-
-当前代码已经从“脚本集合”收敛到“可安装包 + 统一 CLI”。
-
-正式实现位于：
-
-- `src/wall/cli.py`
-- `src/wall/io/`
-- `src/wall/render/`
-- `src/wall/viewer/`
-
-职责划分如下：
-
-- `cli`
-  - 命令入口
-  - `parse / view / open / catalog`
-- `io`
-  - demo 解析
-  - 表读写
-  - DuckDB catalog
-- `render`
-  - 地图渲染
-  - 视觉效果
-  - pygame 组件
-- `viewer`
-  - 本地播放器
-  - 时间轴、回合切换、交互
-  - 当前内部已进一步拆分为：
-    - `viewer/cli.py`
-    - `viewer/shell.py`
-    - `viewer/runtime.py`
-    - `viewer/state.py`
-    - `viewer/layout.py`
-    - `viewer/ui.py`
-    - `viewer/renderer.py`
-    - `viewer/render_player.py`
-    - `viewer/render_sound.py`
-    - `viewer/render_bomb.py`
-    - `viewer/render_utility.py`
-    - `viewer/render_config.py`
-
 ## CLI Direction
 
 统一播放器入口是：
@@ -78,35 +37,6 @@ wall demo\match.dem --renew
 
 - `wall catalog <dataset_dir>`
 
-## Dataset Direction
-
-当前标准数据集格式是：
-
-- `parquet` 表文件
-- `metadata.json`
-
-典型目录结构：
-
-```text
-outputs/
-  match_xxx/
-    metadata.json
-    ticks.parquet
-    player_death.parquet
-    player_hurt.parquet
-    grenades.parquet
-    inferno_startburn.parquet
-    inferred_rounds.parquet
-```
-
-基本原则：
-
-1. demo 文件是输入
-2. dataset 目录是标准中间产物
-3. viewer / render / DuckDB 都只面向 dataset
-
-`duckdb` 不是主存储，而是 dataset 上的查询层。
-
 ## Compatibility Strategy
 
 仓库当前不再保留脚本形式的运行入口。
@@ -128,34 +58,17 @@ pip install -e .
 
 - `wall <demo或数据集目录>`
 
-## Why The Old Viewer Entry Hung
+## Near-Term Product Direction
 
-之前出现过 `--help` 都会卡住很久的问题。
+接下来一段时间的重点仍然是把“播放器主链路”做扎实，而不是提前扩成完整分析平台。
 
-根因不是 demo 解析慢，而是旧入口在顶层直接 import 整个 viewer 实现，导致：
+优先级建议如下：
 
-- `pygame`
-- 渲染模块
-- 地图模块
-
-在显示帮助前就被一起加载。
-
-当前修复方案是：
-
-1. `wall.cli` 改成懒加载
-2. viewer 启动链路拆成 `cli -> shell -> runtime / renderer`
-3. 不再保留脚本形式的多入口
-4. `--help` 不再触发重模块加载
-
-## Near-Term Cleanup Direction
-
-接下来继续收敛代码时，优先级建议如下：
-
-1. 保持 `src/wall/*` 为唯一正式实现
-2. 不再恢复多入口脚本
-3. 为 `parse -> dataset -> viewer` 主链路补最小测试
+1. 稳定 `demo -> dataset -> viewer` 主链路
+2. 补齐关键语义层查询，避免 viewer 回头直接查表
+3. 继续补最小但有效的单测
 4. 把资源路径、地图路径、输出路径继续统一
-5. 保持语义查询在 domain，viewer 只做 orchestration 和 drawing
+5. 在不破坏播放器稳定性的前提下，再增加信息可视化能力
 
 ## Perception Roadmap
 
@@ -324,3 +237,13 @@ pip install -e .
 5. 信息时间线回放
 6. 信息驱动的操作点评
 7. 最后再考虑模型评分
+
+## Related Docs
+
+架构边界和模块职责请看：
+
+- `docs/architecture.md`
+
+viewer 解耦过程和当前完成度请看：
+
+- `docs/viewer-decoupling-checklist.md`
