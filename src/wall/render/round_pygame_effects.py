@@ -132,7 +132,7 @@ def _build_eye_outline_points(
 
 
 def load_flash_eye_texture() -> pygame.Surface | None:
-    texture_path = resolve_asset_path("flash_eye.png")
+    texture_path = resolve_asset_path("effects", "flash", "flash_eye.png")
     if not texture_path.exists():
         return None
     try:

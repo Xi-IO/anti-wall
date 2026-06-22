@@ -448,6 +448,10 @@ def _empty_sound_events() -> pd.DataFrame:
     )
 
 
+GRENADE_BOUNCE_CLUSTER_GAP_TICKS = 6
+GRENADE_BOUNCE_DURATION_TICKS = 12
+
+
 def _position_lookup_from_ticks(ticks: pd.DataFrame) -> pd.DataFrame:
     work = ticks.copy()
     work["steamid_key"] = _normalize_identifier(work.get("steamid", pd.Series(index=work.index, dtype="object")))
@@ -1123,6 +1127,34 @@ def build_grenade_bounce_sound_events(grenades: pd.DataFrame) -> pd.DataFrame:
     if candidates.empty:
         return _empty_sound_events()
 
+    # A single wall impact often produces several adjacent trajectory kinks.
+    # Collapse short same-grenade runs into one semantic bounce event.
+    # IMPORTANT: this is semantic deduplication, not a visual tweak. Viewer code should
+    # receive one bounce event per short impact burst instead of re-implementing this.
+    candidates = candidates.sort_values(["grenade_entity_id", "tick"]).copy()
+    tick_gap = candidates.groupby("grenade_entity_id", sort=False)["tick"].diff()
+    candidates["bounce_cluster_start"] = tick_gap.isna() | (tick_gap > GRENADE_BOUNCE_CLUSTER_GAP_TICKS)
+    candidates["bounce_cluster"] = (
+        candidates.groupby("grenade_entity_id", sort=False)["bounce_cluster_start"].cumsum().astype("int64")
+    )
+    vertical_score = candidates["vertical_bounce"].astype("int64") * 1000
+    impact_score = (
+        candidates["vz_out"].abs().fillna(0.0)
+        + candidates["vz_in"].abs().fillna(0.0)
+        + candidates["speed_in_xy"].fillna(0.0)
+        + candidates["speed_out_xy"].fillna(0.0)
+    )
+    candidates["bounce_pick_score"] = vertical_score + impact_score
+    candidates = (
+        candidates.sort_values(
+            ["grenade_entity_id", "bounce_cluster", "bounce_pick_score", "tick"],
+            ascending=[True, True, False, True],
+        )
+        .drop_duplicates(["grenade_entity_id", "bounce_cluster"], keep="first")
+        .sort_values(["tick", "grenade_entity_id"])
+        .copy()
+    )
+
     candidates["detail"] = np.where(candidates["vertical_bounce"], "grenade_bounce_vertical", "grenade_bounce_turn")
     result = pd.DataFrame(
         {
@@ -1136,7 +1168,7 @@ def build_grenade_bounce_sound_events(grenades: pd.DataFrame) -> pd.DataFrame:
             "y": candidates["y"].astype("float64"),
             "z": candidates["z"].astype("float64"),
             "radius_world": 650.0,
-            "duration_ticks": 14,
+            "duration_ticks": GRENADE_BOUNCE_DURATION_TICKS,
             "detail": (candidates["detail"].astype(str) + "|" + candidates["grenade_type"].astype(str)).astype("string"),
             "impact_speed_z": np.nan,
             "inferred_round_id": candidates["inferred_round_id"].astype("int64"),

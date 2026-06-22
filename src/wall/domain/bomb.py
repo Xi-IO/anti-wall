@@ -72,6 +72,16 @@ class DefuseAttemptVisual:
     status: str
 
 
+@dataclass(frozen=True)
+class BombRenderState:
+    icon_state: str | None
+    world_position: tuple[float, float] | None
+    carrier: str | None
+    planted_timer_progress: float | None
+    defuse_visual: DefuseAttemptVisual | None
+    plant_visual: PlantAttemptVisual | None
+
+
 class BombTimeline:
     def __init__(
         self,
@@ -608,6 +618,36 @@ class BombTimeline:
         max_ticks = max(1, int(total_ticks))
         elapsed_ticks = max(0, min(max_ticks, frame_tick - int(state.start_tick)))
         return elapsed_ticks / max_ticks
+
+    def render_state_at(
+        self,
+        frame_tick: int,
+        *,
+        planted_total_ticks: int,
+        abort_shake_ticks: int = 20,
+    ) -> BombRenderState:
+        visual_state = self.visual_state_at(frame_tick)
+        icon_state: str | None = None
+        world_position: tuple[float, float] | None = None
+        carrier: str | None = None
+        if visual_state is not None:
+            kind = str(visual_state.state)
+            if kind in {"carried", "dropped", "planted", "defused"}:
+                icon_state = kind
+            if kind == "carried":
+                carrier = visual_state.player or None
+            elif visual_state.x is not None and visual_state.y is not None:
+                world_position = (float(visual_state.x), float(visual_state.y))
+        # IMPORTANT: viewer should consume this aggregate render state instead of
+        # stitching together bomb icon/position/timer queries from segment internals.
+        return BombRenderState(
+            icon_state=icon_state,
+            world_position=world_position,
+            carrier=carrier,
+            planted_timer_progress=self.planted_timer_progress_at(frame_tick, planted_total_ticks),
+            defuse_visual=self.defuse_attempt_visual_at(frame_tick, abort_shake_ticks=abort_shake_ticks),
+            plant_visual=self.plant_attempt_visual_at(frame_tick),
+        )
 
     def pickup_source_at(self, frame_tick: int) -> str | None:
         state = self.state_at(frame_tick)

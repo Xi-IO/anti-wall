@@ -2,7 +2,7 @@
 
 ## Goal
 
-Reduce the amount of game-state interpretation inside `src/wall/viewer/app.py`.
+Reduce the amount of game-state interpretation inside the active viewer stack under `src/wall/viewer/`.
 
 The target structure is:
 
@@ -16,98 +16,94 @@ The viewer should gradually stop:
 - duplicating rules that already belong to parse or domain
 - depending on the internal layout of state segments
 
+Current viewer module split:
+
+- `viewer/cli.py`: startup entrypoint
+- `viewer/shell.py`: event loop, playback orchestration, sidebar / timeline coordination
+- `viewer/runtime.py`: round switching and frame-cache lifecycle
+- `viewer/state.py`: interaction state
+- `viewer/layout.py` and `viewer/ui.py`: dropdown / sidebar / bottom-bar layout and drawing
+- `viewer/renderer.py`: round-frame render coordinator
+- `viewer/render_player.py`: player body / label / tracer / muzzle-flash drawing
+- `viewer/render_sound.py`: sound-ring drawing
+- `viewer/render_bomb.py`: bomb and defuse visuals
+- `viewer/render_utility.py`: smoke / flash / HE / inferno visuals
+- `viewer/render_config.py`: viewer-only render constants
+
 ## Current Main Coupling Points
 
 ### 1. Bomb display still knows segment internals
 
 Current state:
 
-- viewer already uses `BombTimeline`
-- but it still reads `BombState` fields like `state`, `x`, `y`, `start_tick`
-- planted timer / dropped icon / carried icon logic still partially depends on bomb internals
+- `BombTimeline.render_state_at(...)` is now the main semantic entrypoint for bomb visuals
+- viewer-side bomb drawing has been split into `viewer/render_bomb.py`
+- active viewer code no longer reopens raw bomb segments to decide icon state, plant visuals, or defuse visuals
 
 Why it matters:
 
-- if bomb-state construction changes, viewer can silently drift out of sync
-- debugging "flashing bomb", "missing bomb", or "wrong carrier" becomes harder
+- bomb semantics and bomb visuals are now much less coupled
+- the remaining risk is mostly accidental bypasses in future code, not the current path
 
 Next steps:
 
-- add `bomb_icon_state_at(tick)`
-- add `planted_timer_progress_at(tick)`
-- add `defuse_progress_at(tick)`
-- add `drop_reason_at(tick)`
-- move more icon-selection and timer-state decisions into `BombTimeline`
+- keep new bomb-state queries inside `BombTimeline`
+- avoid reintroducing direct segment inspection in viewer helpers
+- only widen `BombRenderState` if a new visual really needs new semantic data
 
 Priority:
 
-- high
+- completed for the active path
 
 ### 2. Sound presentation rules live in the viewer
 
 Current state:
 
-- viewer owns `SOUND_STYLE_BY_KIND`
-- viewer decides circle suppression, display radius multipliers, alpha tweaks, and conflict resolution
-- same-emitter "show only the larger circle" rule is a viewer rule
+- `SoundTimeline` now owns:
+  - sound style metadata
+  - suppression / grouping rules
+  - capped-label decisions
+  - per-frame sound presentation queries
+- viewer-side sound drawing has been split into `viewer/render_sound.py`
+- the viewer now mostly owns only pure draw concerns such as cached ring surfaces and pixel offsets
 
 Why it matters:
 
-- sound semantics and sound rendering rules are mixed together
-- future changes to footsteps, landing, gunfire, grenade bounce, bomb sounds, or weapon-specific rules will keep making `app.py` fatter
+- the main sound-coupling risk has been removed from the active viewer path
+- future work should keep semantic changes in parse/domain and leave `render_sound.py` cosmetic-only
 
 Next steps:
 
-- decide which parts stay purely visual and which belong to semantic data
-- consider adding semantic columns to `sound_events`, for example:
-  - `display_group`
-  - `display_priority`
-  - `suppress_lower_priority_same_emitter`
-  - `display_radius_world`
-- alternatively add a small `SoundTimeline` / `SoundPresentation` helper in domain
+- keep adding gameplay meaning in parse/domain first
+- only add render-module parameters for cosmetic choices
+- avoid moving suppression or grouping logic back into the viewer
 
 Priority:
 
-- high
+- completed for the active path
 
 ### 3. Grenade / smoke / inferno windows are assembled in the viewer
 
 Current state:
 
-- done:
-  - `UtilityTimeline` already builds:
-    - `grenade_trails`
-    - `smoke_windows`
-    - `flash_effects`
-    - `he_effects`
-    - `inferno_effects`
-    - smoke-hole recovery data
-- viewer still keeps a few compatibility aliases such as:
-  - `self.grenade_trails`
-  - `self.smoke_windows`
-  - `self.flash_effects`
-  - `self.he_effects`
-  - `self.inferno_effects`
-  - `self.smoke_holes_by_window`
+- `UtilityTimeline` is the semantic owner for grenade trails, smoke windows, flashes, HE bursts, infernos, and smoke-hole recovery
+- viewer-side utility drawing has been split into `viewer/render_utility.py`
+- the active viewer path no longer keeps the old compatibility aliases around as primary state
 
 Why it matters:
 
-- this is already domain logic, not just drawing
-- adding more utility semantics will make the viewer harder to maintain
+- utility semantics are now mostly separated from utility drawing
+- the main remaining risk is future feature code bypassing `UtilityTimeline`
 
 Next steps:
 
 - keep `UtilityTimeline` as the semantic owner
-- gradually remove compatibility aliases from the viewer where they do not help readability
-- if smoke-hole data grows more complex, consider replacing raw dict payloads with typed dataclasses
-- keep viewer focused on:
-  - position to pixel conversion
-  - sprite selection
-  - alpha / animation playback
+- keep `render_utility.py` focused on sprite selection, alpha, and animation playback
+- if new utility effects appear, extend timeline queries before adding viewer-side state
 
 Priority:
 
-- mostly done
+- completed for the active path
 
 ### 4. Viewer still receives many raw round tables
 
@@ -138,16 +134,16 @@ Priority:
 
 Current state:
 
-- `RoundPlayers` and `PlayerTimeline` already centralize much of the player state
-- but viewer still combines some player-state rules with rendering decisions:
-  - tracer timing
-  - muzzle-flash timing
-  - flash / damage overlay usage
-  - some alive / team / state combinations
+- `RoundPlayers` and `PlayerTimeline` centralize most player state queries
+- pure player drawing has been split into `viewer/render_player.py`
+- `renderer.py` still coordinates a few semantic-to-visual decisions:
+  - choosing alive vs death-marker path
+  - deriving tracer hit targets from player timelines
+  - mapping overlay state into final player tinting
 
 Why it matters:
 
-- continued feature growth can push player-action interpretation back into `app.py`
+- continued feature growth can push player-action interpretation back into `renderer.py`
 
 Next steps:
 
@@ -157,7 +153,7 @@ Next steps:
 
 Priority:
 
-- medium
+- mostly done
 
 ## Recommended Order
 
@@ -184,6 +180,8 @@ Expected benefit:
 Current status:
 
 - completed for smoke / flash / HE / inferno / grenade trails / smoke-hole recovery
+- viewer no longer reads grenade-trail `DataFrame` payloads directly
+- smoke-hole payloads are now typed domain objects instead of raw dicts
 - remaining work is cleanup, not missing architecture
 
 ### Phase 3: sound presentation cleanup
@@ -193,7 +191,26 @@ Current status:
 
 Expected benefit:
 
-- easier iteration on sound circles without repeatedly touching `app.py`
+- easier iteration on sound circles without repeatedly touching the main render coordinator
+
+Current status:
+
+- mostly completed
+- `SoundTimeline` now owns:
+  - sound style metadata
+  - suppression / grouping rules
+  - capped-label decisions
+  - per-frame sound presentation queries
+- parse now deduplicates short `grenade_bounce` bursts before the viewer sees them
+- viewer still owns a small set of pure drawing constants such as:
+  - ring surface fill math
+  - label pixel offset
+  - cached surface reuse
+
+Important note:
+
+- gameplay meaning for sound should now be added in parse/domain first
+- `renderer.py` should only consume `SoundTimeline.present_events_at(...)` results for sound drawing
 
 ### Phase 4: narrow viewer inputs
 
@@ -203,9 +220,45 @@ Expected benefit:
 
 - prevents coupling from regrowing
 
+Current status:
+
+- completed for the current viewer path
+- `RoundData` now carries semantic viewer inputs such as:
+  - `round_players`
+  - `utility_timeline`
+  - `bomb_timeline`
+  - `sound_timeline`
+  - `frame_ticks`
+  - `round_start_tick`
+- `PygameRoundRenderer` now consumes `RoundData` directly instead of receiving a long list of round tables
+- viewer utility rendering now prefers `UtilityTimeline` query methods over reopening utility internals
+- unused legacy `RoundRenderer` code has been removed from the active rendering path
+- the previous mixed `viewer/app.py` implementation has been split so the active path now runs through:
+  - `viewer/cli.py`
+  - `viewer/shell.py`
+  - `viewer/renderer.py`
+  - specialized render helpers for player / sound / bomb / utility visuals
+
+Important note:
+
+- when adding new viewer features, prefer extending `RoundData` with semantic objects first
+- avoid widening `PygameRoundRenderer(...)` back into another long raw-table parameter list
+
+### Phase 4 cleanup status
+
+- renderer-only helpers are now split by responsibility:
+  - player visuals
+  - sound visuals
+  - bomb visuals
+  - utility-effect visuals
+- the old `viewer/app.py` path has been fully retired after downstream imports were updated
+- remaining work is mostly:
+  - documentation and naming cleanup
+  - selective unit coverage for pure helper modules
+
 ## Low-Cost Wins
 
-- avoid new direct DataFrame filtering in `app.py`
+- avoid new direct DataFrame filtering in `renderer.py` or `shell.py`
 - when adding a gameplay rule, prefer parse/domain first
 - if a viewer helper needs to know gameplay meaning, consider whether it belongs in domain instead
 - when a state is already represented as a timeline, add a query method instead of exposing more internal fields

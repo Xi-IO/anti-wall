@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -68,6 +69,12 @@ class PlayerFrame:
     velocity_x: float
     velocity_y: float
     velocity_z: float
+
+
+@dataclass(frozen=True)
+class PlayerOverlayState:
+    damage_flash_fade: float
+    blind_strength: float
 
 
 class PlayerTimeline:
@@ -167,6 +174,19 @@ class PlayerTimeline:
             latest = (damage_tick, damage)
         return latest
 
+    def overlay_state_at(self, tick: int, *, damage_flash_duration_ticks: int) -> PlayerOverlayState:
+        damage_flash_fade = 0.0
+        flash = self.latest_damage_flash(tick)
+        if flash is not None:
+            damage_tick, _damage = flash
+            elapsed = tick - damage_tick
+            if 0 <= elapsed <= damage_flash_duration_ticks:
+                damage_flash_fade = max(0.0, min(1.0, 1.0 - (elapsed / max(1, damage_flash_duration_ticks))))
+        return PlayerOverlayState(
+            damage_flash_fade=damage_flash_fade,
+            blind_strength=self.blind_strength_at(tick),
+        )
+
     def blind_strength_at(self, tick: int) -> float:
         strength = 0.0
         for event in self.blind_events:
@@ -200,6 +220,21 @@ class PlayerTimeline:
                 break
             matches.append(event)
         return matches
+
+    def resolve_hit_position_for_fire_event(
+        self,
+        fire_event: pd.Series,
+        *,
+        max_tick: int,
+        victim_position_lookup: Callable[[pd.Series], tuple[float, float] | None],
+    ) -> tuple[float, float] | None:
+        fire_tick = int(fire_event["tick"])
+        hurts = self.hurt_events_after(fire_tick, max_tick)
+        for hurt in hurts:
+            hit_xy = victim_position_lookup(hurt)
+            if hit_xy is not None:
+                return hit_xy
+        return None
 
     def death_event_at(self, tick: int) -> pd.Series | None:
         shown: pd.Series | None = None

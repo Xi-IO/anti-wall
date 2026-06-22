@@ -39,6 +39,19 @@
 - `viewer`
   - 本地播放器
   - 时间轴、回合切换、交互
+  - 当前内部已进一步拆分为：
+    - `viewer/cli.py`
+    - `viewer/shell.py`
+    - `viewer/runtime.py`
+    - `viewer/state.py`
+    - `viewer/layout.py`
+    - `viewer/ui.py`
+    - `viewer/renderer.py`
+    - `viewer/render_player.py`
+    - `viewer/render_sound.py`
+    - `viewer/render_bomb.py`
+    - `viewer/render_utility.py`
+    - `viewer/render_config.py`
 
 ## CLI Direction
 
@@ -119,7 +132,7 @@ pip install -e .
 
 之前出现过 `--help` 都会卡住很久的问题。
 
-根因不是 demo 解析慢，而是旧入口在顶层直接 import viewer 实现，导致：
+根因不是 demo 解析慢，而是旧入口在顶层直接 import 整个 viewer 实现，导致：
 
 - `pygame`
 - 渲染模块
@@ -130,8 +143,9 @@ pip install -e .
 当前修复方案是：
 
 1. `wall.cli` 改成懒加载
-2. 不再保留脚本形式的多入口
-3. `--help` 不再触发重模块加载
+2. viewer 启动链路拆成 `cli -> shell -> runtime / renderer`
+3. 不再保留脚本形式的多入口
+4. `--help` 不再触发重模块加载
 
 ## Near-Term Cleanup Direction
 
@@ -141,6 +155,7 @@ pip install -e .
 2. 不再恢复多入口脚本
 3. 为 `parse -> dataset -> viewer` 主链路补最小测试
 4. 把资源路径、地图路径、输出路径继续统一
+5. 保持语义查询在 domain，viewer 只做 orchestration 和 drawing
 
 ## Perception Roadmap
 

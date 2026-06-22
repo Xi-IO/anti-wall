@@ -60,10 +60,61 @@ class InfernoEffect:
 
 @dataclass(frozen=True)
 class GrenadeTrail:
-    points: pd.DataFrame
+    points: tuple["GrenadeTrailPoint", ...]
     grenade_type: str
     burn_icon_path: str | None
     did_burn: bool
+    smoke_start_tick: int | None = None
+    flash_start_tick: int | None = None
+    he_burst_start_tick: int | None = None
+
+    def point_at_tick(self, frame_tick: int) -> "GrenadeTrailPoint | None":
+        for point in reversed(self.points):
+            if point.tick == frame_tick:
+                return point
+            if point.tick < frame_tick:
+                break
+        return None
+
+    def recent_points_at(self, frame_tick: int, recent_window_ticks: int) -> list["GrenadeTrailPoint"]:
+        return [
+            point
+            for point in self.points
+            if frame_tick - recent_window_ticks <= point.tick <= frame_tick
+        ]
+
+    def should_hide_at(self, frame_tick: int, smoke_deploy_ticks: int) -> bool:
+        if self.grenade_type == "CSmokeGrenadeProjectile":
+            return self.smoke_start_tick is not None and frame_tick >= self.smoke_start_tick + smoke_deploy_ticks
+        if self.grenade_type == "CFlashbangProjectile":
+            return self.flash_start_tick is not None and frame_tick >= self.flash_start_tick
+        if self.grenade_type == "CHEGrenadeProjectile":
+            return self.he_burst_start_tick is not None and frame_tick >= self.he_burst_start_tick
+        return False
+
+
+@dataclass(frozen=True)
+class GrenadeTrailPoint:
+    tick: int
+    x: float
+    y: float
+    z: float
+
+
+@dataclass(frozen=True)
+class ActiveGrenadeTrail:
+    grenade_type: str
+    burn_icon_path: str | None
+    current_x: float
+    current_y: float
+    recent_points: tuple[GrenadeTrailPoint, ...]
+
+
+@dataclass(frozen=True)
+class SmokeHole:
+    start_tick: int
+    x: float
+    y: float
 
 
 class UtilityTimeline:
@@ -110,8 +161,29 @@ class UtilityTimeline:
     def has_grenade_trails(self) -> bool:
         return bool(self.grenade_trails)
 
-    def iter_grenade_trails(self) -> list[GrenadeTrail]:
-        return self.grenade_trails
+    # IMPORTANT: viewer should ask the utility timeline for active projectile
+    # trail states instead of reopening grenade trajectory DataFrames itself.
+    def active_grenade_trails_at(self, frame_tick: int, *, recent_window_ticks: int, smoke_deploy_ticks: int) -> list[ActiveGrenadeTrail]:
+        active: list[ActiveGrenadeTrail] = []
+        for trail in self.grenade_trails:
+            if trail.should_hide_at(frame_tick, smoke_deploy_ticks):
+                continue
+            current_point = trail.point_at_tick(frame_tick)
+            if current_point is None:
+                continue
+            recent_points = trail.recent_points_at(frame_tick, recent_window_ticks)
+            if not recent_points:
+                continue
+            active.append(
+                ActiveGrenadeTrail(
+                    grenade_type=trail.grenade_type,
+                    burn_icon_path=trail.burn_icon_path,
+                    current_x=current_point.x,
+                    current_y=current_point.y,
+                    recent_points=tuple(recent_points),
+                )
+            )
+        return active
 
     def has_smokes(self) -> bool:
         return bool(self.smoke_windows)
@@ -189,10 +261,10 @@ class UtilityTimeline:
             if smoke.start_tick <= frame_tick <= smoke.end_tick
         ]
 
-    def smoke_start_tick_for_entity(self, entity_id: int) -> int | None:
+    def _smoke_start_tick_for_entity(self, entity_id: int) -> int | None:
         return self.smoke_start_tick_by_entity.get(entity_id)
 
-    def smoke_holes_for_window(self, window_index: int) -> list[dict[str, float | int]]:
+    def smoke_holes_for_window(self, window_index: int) -> list[SmokeHole]:
         return self.smoke_holes_by_window.get(window_index, [])
 
     def _build_flash_effects(self) -> list[FlashEffect]:
@@ -242,7 +314,7 @@ class UtilityTimeline:
     def has_flashes(self) -> bool:
         return bool(self.flash_effects)
 
-    def flash_start_tick_for_entity(self, entity_id: int) -> int | None:
+    def _flash_start_tick_for_entity(self, entity_id: int) -> int | None:
         return self.flash_start_tick_by_entity.get(entity_id)
 
     def _build_he_effects(self) -> list[HeEffect]:
@@ -277,7 +349,7 @@ class UtilityTimeline:
     def has_he_effects(self) -> bool:
         return bool(self.he_effects)
 
-    def he_effect_for_entity(self, entity_id: int) -> HeEffect | None:
+    def _he_effect_for_entity(self, entity_id: int) -> HeEffect | None:
         for effect in self.he_effects:
             if effect.entity_id == entity_id:
                 return effect
@@ -393,12 +465,12 @@ class UtilityTimeline:
     def has_infernos(self) -> bool:
         return bool(self.inferno_effects)
 
-    def _build_smoke_holes_by_window(self) -> dict[int, list[dict[str, float | int]]]:
+    def _build_smoke_holes_by_window(self) -> dict[int, list[SmokeHole]]:
         if not self.smoke_windows or not self.he_effects:
             return {}
         smoke_radius = self.smoke_radius_world
         he_radius = 384.0
-        holes_by_window: dict[int, list[dict[str, float | int]]] = {}
+        holes_by_window: dict[int, list[SmokeHole]] = {}
         for index, smoke in enumerate(self.smoke_windows):
             smoke_start_tick = int(smoke.start_tick)
             smoke_end_tick = int(smoke.end_tick)
@@ -413,11 +485,7 @@ class UtilityTimeline:
                 if dx * dx + dy * dy > (smoke_radius + he_radius) ** 2:
                     continue
                 holes_by_window.setdefault(index, []).append(
-                    {
-                        "start_tick": effect_tick,
-                        "x": float(effect.x),
-                        "y": float(effect.y),
-                    }
+                    SmokeHole(start_tick=effect_tick, x=float(effect.x), y=float(effect.y))
                 )
         return holes_by_window
 
@@ -460,6 +528,10 @@ class UtilityTimeline:
             burn_icon_path: str | None = None
             did_burn = False
             grenade_type = str(current_row["grenade_type"])
+            entity_id = int(current_row["grenade_entity_id"])
+            smoke_start_tick: int | None = None
+            flash_start_tick: int | None = None
+            he_burst_start_tick: int | None = None
             if grenade_type == "CMolotovProjectile":
                 player_name = str(current_row.get("name", ""))
                 steamid_value = current_row.get("steamid")
@@ -467,14 +539,32 @@ class UtilityTimeline:
                 inferno_start = self._match_inferno_start(player_name, steamid, int(current_row["tick"]))
                 team_tick = int(inferno_start["tick"]) if inferno_start is not None else int(current_row["tick"])
                 team_num = self.player_team_lookup(player_name, steamid, team_tick)
-                burn_icon_path = "incgrenade.png" if team_num == 3 else "firebomb.png"
+                burn_icon_path = "icons/equipment/incgrenade.png" if team_num == 3 else "icons/equipment/firebomb.png"
                 did_burn = inferno_start is not None
+            elif grenade_type == "CSmokeGrenadeProjectile":
+                smoke_start_tick = self._smoke_start_tick_for_entity(entity_id)
+            elif grenade_type == "CFlashbangProjectile":
+                flash_start_tick = self._flash_start_tick_for_entity(entity_id)
+            elif grenade_type == "CHEGrenadeProjectile":
+                he_effect = self._he_effect_for_entity(entity_id)
+                he_burst_start_tick = None if he_effect is None else int(he_effect.start_tick)
             trails.append(
                 GrenadeTrail(
-                    points=segment.reset_index(drop=True),
+                    points=tuple(
+                        GrenadeTrailPoint(
+                            tick=int(row["tick"]),
+                            x=float(row["x"]),
+                            y=float(row["y"]),
+                            z=float(row["z"]),
+                        )
+                        for _, row in segment.iterrows()
+                    ),
                     grenade_type=grenade_type,
                     burn_icon_path=burn_icon_path,
                     did_burn=did_burn,
+                    smoke_start_tick=smoke_start_tick,
+                    flash_start_tick=flash_start_tick,
+                    he_burst_start_tick=he_burst_start_tick,
                 )
             )
         return trails

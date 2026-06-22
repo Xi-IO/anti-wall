@@ -89,7 +89,7 @@ def handle_parse(args: argparse.Namespace, demo_path: Path, output_dir: Path) ->
 
 
 def handle_view(dataset: Path, args: argparse.Namespace) -> int:
-    from wall.viewer.app import main as view_main
+    from wall.viewer.cli import main as view_main
 
     if not looks_like_dataset_dir(dataset):
         raise FileNotFoundError(f"Dataset directory not found or invalid: {dataset}")
