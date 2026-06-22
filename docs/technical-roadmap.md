@@ -1,249 +1,446 @@
 # Technical Roadmap
 
-这份文档记录 `wall` 当前的技术路线、兼容策略、后续改造方向，以及与“信息收集/能力评估”相关的设计思路。
+本文档记录 `wall` 的长期技术路线、当前优先级，以及未来研究方向。
 
-## Project Scope
+---
 
-`wall` 当前优先级是：
+# 项目定位
 
-1. 做好 CS2 demo 的解析
-2. 做好数据集目录格式
-3. 做好本地播放器
+`wall` 的核心定位是：
 
-也就是说，当前项目先聚焦“播放器”，不把“鉴挂”作为当前阶段主目标。
+> 面向 CS2 Demo 的信息重建与行为分析平台。
 
-## CLI Direction
+当前优先级：
 
-统一播放器入口是：
+1. 稳定 Demo 解析
+2. 稳定数据集生成
+3. 完善本地播放器
+4. 构建信息重建能力
+
+当前阶段不把“鉴挂”作为主要目标；它只是未来可能的应用方向之一。
+
+---
+
+# 核心理念
+
+项目围绕一个核心问题展开：
+
+> 在某个时刻，一个玩家理论上能够获得哪些信息？
+
+长期目标不是简单播放回放，而是重建：
+
+```text
+世界状态
+→ 可获得信息
+→ 玩家决策
+→ 玩家行为
+```
+
+短期产品主线仍然是：
+
+```text
+Demo
+→ Dataset
+→ Viewer
+```
+
+---
+
+# CLI 方向
+
+统一入口：
 
 ```powershell
 wall demo\match.dem
-```
-
-它表示：
-
-1. 如有需要先解析 demo
-2. 再直接打开 viewer
-
-如果传入的是 `outputs\xxx` 这种数据集目录，则直接打开。
-
-如果想强制更新中间数据，则使用：
-
-```powershell
+wall outputs\match_xxx
 wall demo\match.dem --renew
+wall catalog <dataset_dir>
 ```
 
-当前只保留一个显式辅助子命令：
+默认行为是：如有需要先解析，再直接打开 Viewer。
 
-- `wall catalog <dataset_dir>`
+---
 
-## Compatibility Strategy
+# 数据集理念
 
-仓库当前不再保留脚本形式的运行入口。
+原始表不是最终目标。
 
-运行前需要先安装本地包：
+长期路线：
 
-```powershell
-pip install -e .
+```text
+Raw Events
+→ Semantic Events
+→ Information State
+→ Behavior Analysis
 ```
 
-当前确定的处理方式：
+未来的数据集应逐步提供更高层的语义对象，而不仅仅是 CSV/Parquet 表。
 
-1. 正式实现只继续放在 `src/wall/`
-2. 不再保留脚本形式的兼容运行入口
-3. 新文档和命令示例统一使用 `wall ...`
-4. 对于不再需要的旧脚本，直接删除，不继续保留多入口
+---
 
-当前仓库已经完成这一步，后续只维护：
+# 空间与 Region
 
-- `wall <demo或数据集目录>`
+后续分析尽量使用 Region，而不是直接使用原始坐标。
 
-## Near-Term Product Direction
+推荐空间层级：
 
-接下来一段时间的重点仍然是把“播放器主链路”做扎实，而不是提前扩成完整分析平台。
+```text
+Raw Coordinates
+→ Nav Area
+→ Place Name
+→ Tactical Region
+```
 
-优先级建议如下：
+例如：
 
-1. 稳定 `demo -> dataset -> viewer` 主链路
-2. 补齐关键语义层查询，避免 viewer 回头直接查表
-3. 继续补最小但有效的单测
-4. 把资源路径、地图路径、输出路径继续统一
-5. 在不破坏播放器稳定性的前提下，再增加信息可视化能力
+```text
+(x, y, z)
+→ Area 182
+→ TopMid
+→ Mid
+```
 
-## Perception Roadmap
+推荐保留两层语义 Region：
 
-播放器后续会需要从“看回放”升级到“看信息差”。
+* Level 1: 战术区域
+  `Long / Short / Mid / A Site / B Site`
+* Level 2: 细粒度位置
+  `Pit / Blue Box / Long Corner / Default / Window`
 
-建议分成三类感知信息：
+Region System 是后续信息状态、决策分析、转点分析和行为建模的基础层。
 
-- `直接可见`
-  - 当前视野内敌人
-  - 最近一次可见位置
-  - 可见投掷物、烟、火、C4
-- `直接可听`
-  - 枪声
-  - 脚步
-  - 投掷物
-  - 下包 / 拆包
-- `公共已知`
-  - 击杀信息
-  - 雷包状态
-  - 回合阶段变化
+---
 
-未来建议新增模块：
+# Information State
 
-- `src/wall/domain/perception.py`
-- `src/wall/domain/vision.py`
-- `src/wall/domain/audio.py`
-- `src/wall/domain/knowledge.py`
+长期目标是重建玩家在时刻 `t` 理论上能够获得的信息上界。
 
-## Sound Visualization
+核心组成：
 
-声音可视化是后续最容易落地的一项。
+* 视觉信息
+  当前可见敌人、最近可见位置、投掷物和 C4 可见性
+* 听觉信息
+  枪声、脚步、投掷物声音、下包与拆包声音
+* 公共信息
+  击杀信息、雷包状态、回合阶段
+* 空间信息
+  当前区域、队友区域、已知控制区域
 
-建议分三层：
+未来播放器应支持玩家信息面板，用于展示这些信息状态，而不是试图还原玩家真实想法。
 
-- `事件层`
-  - 谁在什么 tick 产生了声音
-- `传播层`
-  - 简化听距 / 听觉半径
-- `感知层`
-  - 哪些玩家在该 tick 附近理论上能听到
+建议面板优先展示：
 
-版本 1 不需要追求真实音频模拟，重点是：
+* Visible Now
+* Heard Recently
+* Last Seen Enemies
+* Known Enemy Regions
+* Bomb Knowledge
+* Utility Knowledge
+* Team Knowledge
 
-- 能否听到
-- 大概何时听到
-- viewer 如何展示
+---
 
-## Player Knowledge Panel
+# 感知路线
 
-后续目标之一是：
+## 声音
 
-点击右下名册中的某个玩家，显示“到当前时刻为止他理论上能收集到的全部信息”。
+声音系统建议分三层：
 
-建议先把“信息”定义为播放器可推导的外部信息上界，而不是强行还原玩家真实脑内状态。
+```text
+Event Layer
+→ Propagation Layer
+→ Perception Layer
+```
 
-面板可以按这些栏目展示：
+第一版重点是“能否听到”，而不是真实声学模拟。
 
-- `Visible now`
-- `Heard recently`
-- `Known enemy positions`
-- `Bomb knowledge`
-- `Utility knowledge`
+## 可见性
 
-## Vision And Visibility
+可见性系统优先依赖 Awpy 提供的地图几何能力。
 
-“正面 90 度视角内可见的人”可以做，但要分阶段：
+推荐分阶段推进：
 
-### Stage 1: FOV only
+1. `FOV Only`
+   只考虑朝向和距离，用于 Viewer 原型和信息面板验证
+2. `Geometry Visibility`
+   引入 Line Of Sight 判断
+3. `Effective Visibility`
+   在几何可见基础上加入 FOV、烟、闪等视觉干扰
+4. `Perception Layer`
+   区分“理论可见”和“理论上容易注意到”
 
-- 只判断朝向扇形
-- 不判断遮挡
-- 适合 UI 原型
+---
 
-### Stage 2: 2D line-of-sight
+# 地图几何路线
 
-- 引入平面遮挡
-- 需要墙体 / blocker / polygon
-- 先忽略楼层
+原则：
 
-### Stage 3: 3D or quasi-3D visibility
+```text
+Awpy
+负责地图几何
 
-- 加入高度、上下层、室内外遮挡
-- 更接近真实游戏可见性
-- 工程成本最高
+wall
+负责语义和分析
+```
 
-当前阶段更建议先做：
+当前推荐路线：
 
-- `FOV-only`
-- 或 `FOV + 少量启发式过滤`
+```text
+Awpy Geometry
++ Awpy Nav Mesh
++ Awpy Place Names
++ wall Tactical Regions
+```
 
-而不是直接追求完整 3D 可见性。
+`wall` 不重复维护地图几何数据，只维护少量语义层补充，例如 Region Alias 和 Tactical Region Mapping。
 
-## Map Geometry Limitation
+职责边界建议保持为：
 
-当前播放器主要基于地图底图，不是真实 3D 地图建模。
+* Awpy
+  Radar 资源、World/Radar 坐标转换、Nav Mesh、Place Names、Visibility Geometry
+* wall
+  Dataset、Event Timeline、Information State、Viewer、Behavior Analysis
 
-这意味着：
+---
 
-- 角度判断简单
-- 真正遮挡判断困难
-- 楼层、高低差、墙内外判定都不可靠
+# 行为分析路线
 
-当前可选路线：
+行为分析应建立在信息重建之后。
 
-1. 纯简化路线
-   - 只做 FOV 和距离
-2. 中间路线
-   - 为少数地图建立 2D blocker
-3. 重路线
-   - 引入真实几何/BSP/nav 数据
+核心研究链条：
 
-如果当前目标是播放器，中间路线最务实。
+```text
+Information
+→ Decision
+→ Action
+```
 
-## Player Scoring Direction
+短期目标是解释行为，而不是评价行为。
 
-远期可以做“玩家操作评分”，从：
+潜在行为原语包括：
 
-- 菜鸟
-- 普通
-- 高手
-- 可疑
+* Region Transition
+* Holding
+* Rotation
+* Peek
+* Utility Usage
 
-这条路线的核心不是先接模型，而是先定义：
+## 决策点设计
 
-1. 玩家当时能获得什么信息
-2. 玩家当时做了什么操作
-3. 该操作是否和信息条件匹配
+后续不应把每个 `tick` 都视为决策点。
 
-也就是先做“信息约束下的行为解释”。
+更重要的是：
 
-## Small Models vs LLMs
+```text
+决策点应优先定义为空间情境中的战术选择点
+而不是时间轴上的逐 tick 判断点
+```
 
-远期如果要评分，模型是有意义的，但优先级应该是：
+更合理的建模方式是：
 
-1. 规则系统
-2. 统计特征
-3. 小模型
-4. 大模型
+```text
+Behavior = Decision(PositionContext, InformationState, TimePhase)
+```
 
-更具体地说：
+其中：
 
-- 小模型有必要
-  - Logistic Regression
-  - XGBoost
-  - LightGBM
-  - 简单时序模型
-- 大模型不是当前底层核心
-  - 不擅长原始时序几何判断
-  - 成本更高
-  - 更适合做解释和报告生成
+* `PositionContext` 是主轴
+* `InformationState` 是解释轴
+* `TimePhase` 是修饰轴
 
-因此更合理的路线是：
+问题应优先表达为：
 
-1. 先做 deterministic features
-2. 再用小模型做评分
-3. 最后再考虑用大模型把结果组织成人话说明
+```text
+玩家在这个位置情境下
+结合当时可获得的信息
+选择了什么后续行动？
+```
 
-## Recommended Build Order
+## 空间决策点
 
-如果继续按播放器方向推进，建议顺序如下：
+决策点优先从具有战术意义的空间情境中生成，例如：
 
-1. 声音事件与听觉可视化
-2. 玩家信息面板
-3. 简化 FOV 可见性
-4. 2D 遮挡层
-5. 信息时间线回放
-6. 信息驱动的操作点评
-7. 最后再考虑模型评分
+* 进入关键区域
+* 在某个位置停留、观察、架枪或等待
+* 离开某个区域并改变路线或战术重心
 
-## Related Docs
+也就是说，决策分析首先依赖：
 
-架构边界和模块职责请看：
+```text
+位置情境
++ 信息状态
++ 后续行动
+```
 
-- `docs/architecture.md`
+## PositionContextEpisode
 
-viewer 解耦过程和当前完成度请看：
+在实现层，推荐使用 `PositionContextEpisode` 作为基础分析单位。
 
-- `docs/viewer-decoupling-checklist.md`
+它表示玩家在某个战术位置或区域中停留、进入或离开的一段时间，用于统一记录：
+
+```text
+玩家在哪里
+停留了多久
+看见了什么
+听见了什么
+队友和炸弹信息是什么
+附近有什么烟、火、道具
+随后做出了什么行动
+```
+
+episode 候选可优先从三类事件生成：
+
+```text
+Enter Region
+Dwell Region
+Exit Region
+```
+
+## 分析主链路
+
+后续推荐主链路：
+
+```text
+PlayerTimeline
+  -> RegionTimeline
+  -> PositionContextEpisode
+  -> FutureActionLabel
+  -> DecisionContextMiner
+  -> InformationStateExplainer
+  -> EvidenceAggregator
+```
+
+需要区分三层概念：
+
+```text
+PositionContextEpisode
+Decision Episode
+Evidence Episode
+```
+
+各层含义：
+
+* `PositionContextEpisode`
+  玩家处于某个位置和信息状态中
+* `Decision Episode`
+  玩家在该位置情境下做出了有战术意义的选择
+* `Evidence Episode`
+  该选择后来表现出较强信息价值，可进入后续证据累计
+
+最终判断应来自多个 episode 的累积，而不是单个“可疑瞬间”。
+
+---
+
+# 信息约束下的行为分析
+
+长期关注的问题是：
+
+```text
+玩家获得的信息
+→ 是否足以支持该行为
+```
+
+例如：
+
+* 这次转点是否有信息支撑
+* 这次架枪是否有信息支撑
+* 行为能否由已有信息解释
+
+---
+
+# 机器学习路线
+
+机器学习不是当前优先级。
+
+当前阶段应先完成：
+
+```text
+稳定数据集
+→ 语义时间线
+→ Region / Sound / Visibility / Utility
+→ Information State
+→ PositionContextEpisode
+→ 行为解释
+```
+
+在这些基础对象稳定之前，不急于训练模型。机器学习应作为后期辅助分析工具，而不是直接替代信息重建或行为解释。
+
+未来主要用途：
+
+* 发现相似位置情境下的常见行为分叉
+* 判断某个后续行动在相似情境中是否罕见
+* 聚类玩家在不同 Region / Information State 下的行为模式
+* 为 episode-level 分析提供统计基线
+* 辅助生成解释、报告和异常片段排序
+
+推荐顺序：
+
+```text
+规则系统
+→ 统计特征
+→ 相似情境基线
+→ 传统模型
+→ 时序模型
+→ 大模型辅助解释
+```
+
+当前原则：
+
+```text
+先重建信息
+再解释行为
+最后才考虑学习模型
+```
+
+机器学习的目标不是直接判断玩家是否可疑，而是帮助回答：
+
+```text
+在相似位置情境和信息状态下，
+这个后续行动是否常见？
+```
+
+可考虑的模型类型：
+
+* 传统模型
+  Logistic Regression、Random Forest、XGBoost、LightGBM
+* 时序模型
+  HMM、Temporal CNN、Transformer
+* 大模型
+  主要用于解释、报告和结果总结，不负责底层行为推断
+
+---
+
+# 研究方向
+
+未来可能探索：
+
+* FPS 环境中的信息重建
+* 信息可获得性建模
+* 部分可观测环境下的决策行为
+* 信息约束下的行为分析
+* Hidden-State Alignment
+
+---
+
+# 推荐开发顺序
+
+当前推荐路线：
+
+1. Player / Bomb / Viewer decoupling 收尾
+2. Region System
+3. UtilityTimeline：烟、闪、火、雷的有效窗口
+4. SoundExposure：谁在何时能听到什么
+5. FOV Visibility：先做轻量可见性
+6. Player Information Panel：展示 visible / heard / bomb / utility
+7. InformationState 表落盘
+8. PositionContextEpisode
+9. Behavior primitives
+10. Action explanation / evidence aggregation
+11. Statistics / ML
+
+---
+
+# Related Docs
+
+* `docs/architecture.md`
+* `docs/viewer-decoupling-checklist.md`

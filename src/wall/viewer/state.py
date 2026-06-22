@@ -10,15 +10,15 @@ import pygame
 class PlaybackState:
     current_frame_index: int = 0
     current_playback_tick: float = 0.0
-    playing: bool = False
+    playing: bool = True
     dragging_timeline: bool = False
 
     # IMPORTANT: keep playback index/tick synchronization here so viewer UI
     # code does not reimplement timeline state transitions in multiple places.
-    def reset(self, frame_ticks: list[int]) -> None:
+    def reset(self, frame_ticks: list[int], *, playing: bool = True) -> None:
         self.current_frame_index = 0
         self.current_playback_tick = float(frame_ticks[0]) if frame_ticks else 0.0
-        self.playing = False
+        self.playing = playing
         self.dragging_timeline = False
 
     def set_frame_index(self, frame_index: int, frame_ticks: list[int]) -> int:

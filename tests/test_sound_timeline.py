@@ -119,6 +119,39 @@ class SoundTimelineTests(unittest.TestCase):
         self.assertEqual(event.center_marker_radius, 1)
         self.assertEqual(event.center_marker_alpha_cap, 120)
 
+    def test_drop_sound_styles_are_distinct(self) -> None:
+        df = pd.DataFrame(
+            [
+                {
+                    "tick": 10,
+                    "sound_kind": "weapon_drop",
+                    "x": 100.0,
+                    "y": 200.0,
+                    "radius_world": 650.0,
+                    "duration_ticks": 10,
+                    "emitter_name": "player-a",
+                    "emitter_steamid": "steamid-a",
+                },
+                {
+                    "tick": 10,
+                    "sound_kind": "utility_drop",
+                    "x": 180.0,
+                    "y": 260.0,
+                    "radius_world": 650.0,
+                    "duration_ticks": 10,
+                    "emitter_name": "player-b",
+                    "emitter_steamid": "steamid-b",
+                },
+            ]
+        )
+
+        shown = _present(df, 10)
+
+        self.assertEqual(len(shown), 2)
+        by_kind = {event.sound_kind: event for event in shown}
+        self.assertEqual(by_kind["weapon_drop"].color, (164, 196, 214))
+        self.assertEqual(by_kind["utility_drop"].color, (198, 182, 244))
+
     def test_capped_gunfire_exposes_map_label(self) -> None:
         df = pd.DataFrame(
             [

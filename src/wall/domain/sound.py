@@ -70,6 +70,8 @@ SOUND_STYLE_BY_KIND: dict[str, SoundStyle] = {
     "landing": SoundStyle(color=(176, 108, 48), draw_priority=30, alpha_mult=1.05, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=0.10),
     "gunfire": SoundStyle(color=(245, 245, 245), draw_priority=10, alpha_mult=0.42, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=0.0, capped_label="MAP"),
     "damage": SoundStyle(color=(224, 78, 78), draw_priority=25, alpha_mult=0.82, ring_width=2, display_radius_mult=0.72, fill_alpha_mult=0.08),
+    "weapon_drop": SoundStyle(color=(164, 196, 214), draw_priority=26, alpha_mult=0.70, ring_width=2, display_radius_mult=0.84, fill_alpha_mult=0.10),
+    "utility_drop": SoundStyle(color=(198, 182, 244), draw_priority=27, alpha_mult=0.76, ring_width=2, display_radius_mult=0.88, fill_alpha_mult=0.12),
     "grenade_bounce": SoundStyle(
         color=(188, 224, 236),
         draw_priority=45,

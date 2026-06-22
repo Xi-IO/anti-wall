@@ -212,6 +212,7 @@ def main(argv: list[str] | None = None) -> None:
         footsteps=footsteps,
         fires=fires,
         hurts=hurts,
+        item_drops=item_drops,
         weapon_reloads=weapon_reloads,
         weapon_zooms=weapon_zooms,
         grenades=grenades,
@@ -1392,12 +1393,105 @@ def build_weapon_zoom_sound_events(weapon_zooms: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def build_item_drop_sound_events(item_drops: pd.DataFrame) -> pd.DataFrame:
+    if item_drops.empty:
+        return _empty_sound_events()
+    out = normalize_sound_source(
+        item_drops,
+        sound_kind="weapon_drop",
+        sound_source="item_drop",
+        radius_world=650.0,
+        duration_ticks=10,
+        emitter_name_col="user_name",
+        emitter_steamid_col="user_steamid",
+        detail_value="item_drop_unknown",
+        x_candidates=["X", "x"],
+        y_candidates=["Y", "y"],
+        z_candidates=["Z", "z"],
+    )
+    if out.empty:
+        return out
+    if "defindex" not in item_drops.columns:
+        out["weapon_id"] = pd.Series(["unknown"] * len(out), index=out.index, dtype="string")
+        out["audible_rule"] = pd.Series(["radius"] * len(out), index=out.index, dtype="string")
+        out["is_global"] = pd.Series([False] * len(out), index=out.index, dtype="boolean")
+        out["is_suppressed"] = pd.Series([False] * len(out), index=out.index, dtype="boolean")
+        return out
+
+    defindex = pd.to_numeric(item_drops.get("defindex"), errors="coerce")
+    item_name = _normalize_identifier(item_drops.get("item_name", pd.Series(index=item_drops.index, dtype="object"))).str.lower()
+    keep_mask: list[bool] = []
+    sound_kinds: list[str] = []
+    radii: list[float] = []
+    details: list[str] = []
+    weapon_ids: list[str] = []
+    audible_rules: list[str] = []
+    is_globals: list[bool] = []
+    is_suppressed: list[bool] = []
+
+    grenade_weapon_ids = {
+        "weapon_flashbang",
+        "weapon_hegrenade",
+        "weapon_smokegrenade",
+        "weapon_molotov",
+        "weapon_decoy",
+        "weapon_incgrenade",
+    }
+
+    for index, value in enumerate(defindex.tolist()):
+        name_value = item_name.iloc[index]
+        spec = find_weapon_spec(WEAPON_SPECS, value)
+        weapon_id = spec.weapon_id if spec is not None else "unknown"
+        if value == 49 or "c4" in name_value or weapon_id == "weapon_c4":
+            keep_mask.append(False)
+            sound_kinds.append("bomb")
+            radii.append(0.0)
+            details.append("c4_drop")
+            weapon_ids.append("weapon_c4")
+            audible_rules.append("radius")
+            is_globals.append(False)
+            is_suppressed.append(False)
+            continue
+
+        keep_mask.append(True)
+        drop_radius = spec.sound.drop_radius if spec is not None and spec.sound.drop_radius is not None else 650.0
+        category_id = spec.category.id if spec is not None else ""
+        category_name = spec.category.name if spec is not None else ""
+        category_text = f"{category_id} {category_name}".lower()
+        is_grenade = weapon_id in grenade_weapon_ids or "grenade" in weapon_id or "grenade" in category_text or "molotov" in weapon_id or "decoy" in weapon_id
+        if is_grenade:
+            sound_kind = "utility_drop"
+            detail_prefix = "utility_drop"
+        else:
+            sound_kind = "weapon_drop"
+            detail_prefix = "weapon_drop"
+        sound_kinds.append(sound_kind)
+        radii.append(float(drop_radius))
+        details.append(f"{detail_prefix}|{weapon_id}")
+        weapon_ids.append(weapon_id)
+        audible_rules.append("radius")
+        is_globals.append(False)
+        is_suppressed.append(bool(spec.sound.suppressed) if spec is not None else False)
+
+    out["sound_kind"] = pd.Series(sound_kinds, index=out.index, dtype="string")
+    out["weapon_id"] = pd.Series(weapon_ids, index=out.index, dtype="string")
+    out["audible_rule"] = pd.Series(audible_rules, index=out.index, dtype="string")
+    out["is_global"] = pd.Series(is_globals, index=out.index, dtype="boolean")
+    out["is_suppressed"] = pd.Series(is_suppressed, index=out.index, dtype="boolean")
+    out["radius_world"] = radii
+    out["detail"] = pd.Series(details, index=out.index, dtype="string")
+    keep = pd.Series(keep_mask, index=out.index, dtype="boolean")
+    out = out[keep.fillna(False)].copy()
+    return out.reset_index(drop=True)
+
+
 def build_sound_events(
     *,
     ticks: pd.DataFrame,
     footsteps: pd.DataFrame,
     fires: pd.DataFrame,
     hurts: pd.DataFrame,
+    item_drops: pd.DataFrame,
     weapon_reloads: pd.DataFrame,
     weapon_zooms: pd.DataFrame,
     grenades: pd.DataFrame,
@@ -1436,6 +1530,7 @@ def build_sound_events(
             emitter_steamid_col="user_steamid",
             detail_value="hurt",
         ),
+        build_item_drop_sound_events(item_drops),
         build_weapon_reload_sound_events(weapon_reloads),
         build_weapon_zoom_sound_events(weapon_zooms),
         normalize_sound_source(

@@ -8,6 +8,15 @@ from wall.viewer.state import PlaybackState, RoundDropdownState
 
 
 class PlaybackStateTests(unittest.TestCase):
+    def test_reset_defaults_to_playing(self) -> None:
+        state = PlaybackState(playing=False)
+
+        state.reset([100, 110, 120])
+
+        self.assertEqual(state.current_frame_index, 0)
+        self.assertEqual(state.current_playback_tick, 100.0)
+        self.assertTrue(state.playing)
+
     def test_seek_to_timeline_position_updates_frame_and_tick(self) -> None:
         state = PlaybackState()
         timeline_rect = pygame.Rect(10, 0, 100, 16)
