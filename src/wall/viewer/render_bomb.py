@@ -6,6 +6,11 @@ from wall.domain.bomb import BombTimeline, DefuseAttemptVisual
 from wall.viewer.geometry import build_arc_points, build_arc_segment_points
 
 
+def get_bomb_timer_ring_radius(icon: pygame.Surface | None) -> int:
+    icon_radius = max(6, (icon.get_width() // 2) if icon is not None else 6)
+    return icon_radius + 7
+
+
 def draw_defuse_progress(
     *,
     surface: pygame.Surface,
@@ -64,8 +69,7 @@ def draw_planted_bomb_timer(
     if remaining_fraction <= 0.0:
         return
 
-    icon_radius = max(6, (icon.get_width() // 2) if icon is not None else 6)
-    ring_radius = icon_radius + 7
+    ring_radius = get_bomb_timer_ring_radius(icon)
     ring_width = 3
     shadow_points = build_arc_points(center[0] + 1, center[1] + 1, ring_radius, remaining_fraction)
     ring_points = build_arc_points(center[0], center[1], ring_radius, remaining_fraction)
@@ -99,8 +103,7 @@ def draw_plant_attempts(
         return
     overlay = pygame.Surface(overlay_size, pygame.SRCALPHA)
     icon = c4_icons.get("carried") or c4_icons.get("planted")
-    icon_radius = max(6, (icon.get_width() // 2) if icon is not None else 6)
-    ring_radius = max(icon_radius + 14, 22)
+    ring_radius = get_bomb_timer_ring_radius(icon)
     ring_width = 4
     progress_color = (214, 126, 54)
     track_color = (70, 42, 22)
