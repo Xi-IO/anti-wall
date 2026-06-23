@@ -34,6 +34,7 @@ pip-wheel-metadata/
 outputs/
 outputs_player/
 tmp_*/
+tmp_test_assets/
 *.duckdb
 *.duckdb.wal
 *.db
@@ -42,6 +43,7 @@ tmp_*/
 
 # Local Awpy cache
 .awpy/
+.awpy-assets/
 
 # Game demo
 demo/

@@ -9,7 +9,7 @@
 - 从 demo header 中提取地图等基础信息并落盘
 - 使用 Awpy 官方地图数据作为回合渲染背景
 - 提供本地 pygame GUI 播放器
-- 提供统一 CLI：`wall <demo或数据集目录>` 和 `wall catalog`
+- 提供统一 CLI：`wall <demo或数据集目录>`、`wall catalog`、`wall assets`
 
 ## 当前目录
 
@@ -53,17 +53,44 @@ pip install -e .[dev]
 wall --help
 ```
 
-### 4. 安装 Awpy 地图数据
+### Awpy 地图资产
 
-第一次使用地图背景前，需要拉取 Awpy 官方地图资源：
+`wall` 运行时会使用 Awpy 官方地图资产，但不会再依赖 `C:\Users\...\ .awpy`。
+
+当前约定：
+
+- 资产默认缓存在仓库根目录的 [`.awpy-assets/`](./.awpy-assets)
+- 按类型分成：
+  - `maps/`
+  - `navs/`
+  - `tris/`
+- 这些目录只用于本地运行，不应提交进 git
+
+如果你想提前准备资产，可以显式执行：
 
 ```powershell
-awpy get maps
+wall assets init --feature analysis --yes
 ```
 
-当前项目已经验证可用的地图背景来自：
+如果你只需要 viewer 地图背景：
 
-- `C:\Users\26759\.awpy\maps\`
+```powershell
+wall assets init --feature viewer --yes
+```
+
+查看当前缺什么：
+
+```powershell
+wall assets check --feature analysis
+```
+
+如果已经有 dataset，也可以让 `wall` 从 `metadata.json` 里自动推断地图名：
+
+```powershell
+wall assets init --feature viewer --dataset outputs\match_xxx
+```
+
+另外，直接打开 viewer 时，`wall` 也会先检查当前地图需要的 `maps` 资产；如果缺失，会先做 `y/n` 询问，再下载。
 
 ## CLI
 
@@ -99,6 +126,8 @@ wall outputs\match730_003825715054175584453_1941916173_129
 保留的显式辅助命令只有：
 
 - `wall catalog <dataset_dir>`：为数据集构建 DuckDB catalog
+- `wall assets check ...`：检查 Awpy 地图资产
+- `wall assets init ...`：下载缺失的 Awpy 地图资产
 
 ## 解析 demo
 
@@ -184,6 +213,8 @@ wall outputs\match730_003825715054175584453_1941916173_129 --round 1
 - 地图内显示固定 HUD 编号和玩家 ID
 - 掉血闪红、死亡叉、枪口火光和 tracer
 - 基于 Awpy 地图底图显示玩家移动
+
+如果当前地图的 `maps` 资产缺失，viewer 启动前会先提示是否下载。
 
 ## DuckDB
 

@@ -5,6 +5,15 @@ import json
 import sys
 from pathlib import Path
 
+from wall.assets import (
+    FEATURE_ARTIFACTS,
+    AssetError,
+    artifact_status,
+    check_or_raise_for_feature,
+    collect_missing_artifacts,
+    download_artifact,
+    required_artifacts_for_feature,
+)
 from wall.paths import DEFAULT_OUTPUTS_DIR, dataset_dir_for_demo, looks_like_dataset_dir
 
 
@@ -64,6 +73,37 @@ def build_catalog_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_assets_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="wall assets",
+        description="Check or download local Awpy map assets used by wall.",
+    )
+    parser.add_argument(
+        "action",
+        choices=["check", "init"],
+        help="Check local assets or download missing ones.",
+    )
+    parser.add_argument(
+        "--feature",
+        choices=sorted(FEATURE_ARTIFACTS),
+        default="analysis",
+        help="Feature profile that determines required artifacts.",
+    )
+    parser.add_argument("--map-name", default=None, help="Optional map name such as de_dust2")
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help="Optional dataset directory used to infer the map name from metadata.json.",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Download missing assets without prompting.",
+    )
+    return parser
+
+
 def build_parse_argv(args: argparse.Namespace, demo_path: Path, output_dir: Path) -> list[str]:
     argv = [str(demo_path), "--output-dir", str(output_dir)]
     if args.table_format is not None:
@@ -89,10 +129,13 @@ def handle_parse(args: argparse.Namespace, demo_path: Path, output_dir: Path) ->
 
 
 def handle_view(dataset: Path, args: argparse.Namespace) -> int:
-    from wall.viewer.cli import main as view_main
-
     if not looks_like_dataset_dir(dataset):
         raise FileNotFoundError(f"Dataset directory not found or invalid: {dataset}")
+    demo_map_name = resolve_dataset_map_name(dataset)
+    if demo_map_name:
+        check_or_raise_for_feature("viewer", map_name=str(demo_map_name), prompt=True)
+    from wall.viewer.cli import main as view_main
+
     argv = [str(dataset)]
     if args.round_id is not None:
         argv.extend(["--round", str(args.round_id)])
@@ -123,6 +166,15 @@ def resolve_dataset_demo_path(dataset_dir: Path) -> Path | None:
     if not demo_path:
         return None
     return Path(demo_path)
+
+
+def resolve_dataset_map_name(dataset_dir: Path) -> str | None:
+    metadata_path = dataset_dir / "metadata.json"
+    if not metadata_path.exists():
+        return None
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    map_name = metadata.get("derived", {}).get("map_name")
+    return str(map_name) if map_name else None
 
 
 def handle_playback(args: argparse.Namespace) -> int:
@@ -168,16 +220,63 @@ def handle_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_assets(args: argparse.Namespace) -> int:
+    map_name = args.map_name
+    if map_name is None and args.dataset is not None:
+        if not looks_like_dataset_dir(args.dataset):
+            raise FileNotFoundError(f"Dataset directory not found or invalid: {args.dataset}")
+        map_name = resolve_dataset_map_name(args.dataset)
+    artifacts = required_artifacts_for_feature(args.feature)
+    if args.action == "check":
+        missing = collect_missing_artifacts(artifacts, map_name)
+        if not missing:
+            print(f"Awpy assets ready for {args.feature}.")
+            for artifact in artifacts:
+                status = artifact_status(artifact, map_name)
+                print(f"- {artifact}: {status.path}")
+            return 0
+        print(f"Missing Awpy assets for {args.feature}:")
+        for status in missing:
+            print(f"- {status.artifact}: {status.path}")
+        return 1
+
+    missing = collect_missing_artifacts(artifacts, map_name)
+    if not missing:
+        print(f"Awpy assets already ready for {args.feature}.")
+        return 0
+    if args.yes:
+        for status in missing:
+            download_artifact(status.artifact)
+    else:
+        check_or_raise_for_feature(args.feature, map_name=map_name, prompt=True)
+    still_missing = collect_missing_artifacts(artifacts, map_name)
+    if still_missing:
+        raise AssetError(
+            "Awpy asset initialization did not complete: "
+            + ", ".join(f"{status.artifact} ({status.path})" for status in still_missing)
+        )
+    print(f"Awpy assets ready for {args.feature}.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] == "catalog":
-        parser = build_catalog_parser()
-        args = parser.parse_args(argv[1:])
-        return int(handle_catalog(args))
+    try:
+        if argv and argv[0] == "catalog":
+            parser = build_catalog_parser()
+            args = parser.parse_args(argv[1:])
+            return int(handle_catalog(args))
+        if argv and argv[0] == "assets":
+            parser = build_assets_parser()
+            args = parser.parse_args(argv[1:])
+            return int(handle_assets(args))
 
-    parser = build_playback_parser()
-    args = parser.parse_args(argv)
-    return int(handle_playback(args))
+        parser = build_playback_parser()
+        args = parser.parse_args(argv)
+        return int(handle_playback(args))
+    except AssetError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

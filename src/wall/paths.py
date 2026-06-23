@@ -7,10 +7,23 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_ROOT.parent.parent
 ASSETS_DIR = PROJECT_ROOT / "assets"
 DEFAULT_OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+DEFAULT_AWPY_ASSETS_DIR = PROJECT_ROOT / ".awpy-assets"
+
+
+def awpy_data_dir() -> Path:
+    return DEFAULT_AWPY_ASSETS_DIR
 
 
 def awpy_maps_dir() -> Path:
-    return Path.home() / ".awpy" / "maps"
+    return awpy_data_dir() / "maps"
+
+
+def awpy_navs_dir() -> Path:
+    return awpy_data_dir() / "navs"
+
+
+def awpy_tris_dir() -> Path:
+    return awpy_data_dir() / "tris"
 
 
 def resolve_asset_path(*parts: str) -> Path:
