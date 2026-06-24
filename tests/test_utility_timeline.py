@@ -70,7 +70,5 @@ class UtilityTimelineTests(unittest.TestCase):
         self.assertEqual(len(holes), 1)
         self.assertIsInstance(holes[0], SmokeHole)
         self.assertEqual(holes[0].start_tick, 110)
-
-
 if __name__ == "__main__":
     unittest.main()

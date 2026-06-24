@@ -59,6 +59,17 @@ wall catalog <dataset_dir>
 
 默认行为是：如有需要先解析，再直接打开 Viewer。
 
+当前默认链路还包括：
+
+```text
+demo
+→ parse / dataset build
+→ visibility.parquet
+→ Viewer
+```
+
+也就是说，`visibility.parquet` 已经属于核心 dataset artifact 阶段，而不是 viewer feature。
+
 ---
 
 # 数据集理念
@@ -156,7 +167,16 @@ Event Layer
 
 ## 可见性
 
-可见性系统优先依赖 Awpy 提供的地图几何能力。
+可见性系统仍以 Awpy 几何能力作为 geometry 模式基础，但普通 viewer 启动不再默认走这条路径。
+
+当前应明确区分三种模式：
+
+1. `precomputed`
+   dataset 已有 `visibility.parquet`，viewer 直接消费 artifact
+2. `unavailable`
+   dataset 暂无 `visibility.parquet`，viewer 正常打开，但不展示可见性结果
+3. `geometry`
+   仅显式重建、debug 或 on-demand LOS 才初始化 `awpy.VisibilityChecker`
 
 推荐分阶段推进：
 
@@ -168,6 +188,56 @@ Event Layer
    在几何可见基础上加入 FOV、烟、闪等视觉干扰
 4. `Perception Layer`
    区分“理论可见”和“理论上容易注意到”
+
+## Map-Scoped Visibility Runtime
+
+在进入 batch 之前，先要完成一层稳定的 map-scoped runtime，把单 dataset visibility reconstruction 从 viewer 数据流里独立出来。
+
+目标：
+
+```text
+MatchDataset
+→ Map-Scoped Visibility Context
+→ RoundData
+→ VisibilityResultSet
+→ pair / summary writer
+```
+
+设计边界：
+
+* 把单 dataset visibility export 从 viewer startup 主路径里拆出来
+* 把 `VisibilityChecker` 初始化限制在 `geometry` 模式
+* 普通 viewer 对已有 artifact 应只走 `precomputed` 模式
+* 普通 viewer 对缺失 artifact 应只走 `unavailable` 模式
+* 保持 FOV、敌我、存活、位置有效性和 observer/target tick 查询语义继续留在 domain
+* 不引入 dataset discovery、batch grouping 或 persistent worker pool
+
+当前状态：
+
+* `visibility.parquet` 已作为默认 pair-level artifact 落盘
+* viewer 已与默认 geometry cache 初始化解耦
+* 后续 batch 仍然需要单独命令和 map-grouped worker 设计
+
+## Visibility Batch
+
+当需要批量处理大量已解析数据集时，应单独提供 `wall visibility-batch`，而不是继续堆高单 demo 模式的并发。
+
+目标路线：
+
+```text
+Discover Datasets
+→ Group By Map
+→ Persistent Worker Pool Per Map
+→ One VisibilityChecker Init Per Worker
+→ Many Dataset/Round Tasks Per Worker
+```
+
+设计边界：
+
+* 按 `map_name` 分组，因 `VisibilityChecker` 是地图相关对象
+* worker 生命周期应覆盖多个 dataset，而不是只覆盖一个 demo
+* 默认跳过已存在输出，只有 `--renew` 时重算
+* 单 demo CLI 保持简单，batch 作为独立命令维护
 
 ---
 
@@ -199,7 +269,7 @@ Awpy Geometry
 * Awpy
   Radar 资源、World/Radar 坐标转换、Nav Mesh、Place Names、Visibility Geometry
 * wall
-  Dataset、Event Timeline、Information State、Viewer、Behavior Analysis
+  Dataset、Visibility Artifacts、Event Timeline、Information State、Viewer、Behavior Analysis
 
 ---
 
@@ -430,13 +500,14 @@ Evidence Episode
 2. Region System
 3. UtilityTimeline：烟、闪、火、雷的有效窗口
 4. SoundExposure：谁在何时能听到什么
-5. FOV Visibility：先做轻量可见性
-6. Player Information Panel：展示 visible / heard / bomb / utility
-7. InformationState 表落盘
-8. PositionContextEpisode
-9. Behavior primitives
-10. Action explanation / evidence aggregation
-11. Statistics / ML
+5. Viewer 继续消费 precomputed visibility / unavailable fallback
+6. Visibility Batch：按地图分组复用 checker
+7. Player Information Panel：展示 visible / heard / bomb / utility
+8. InformationState 表落盘
+9. PositionContextEpisode
+10. Behavior primitives
+11. Action explanation / evidence aggregation
+12. Statistics / ML
 
 ---
 

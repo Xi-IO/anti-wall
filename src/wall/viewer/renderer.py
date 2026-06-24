@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import math
-
-import pandas as pd
+import time
 
 try:
     import pygame
@@ -12,10 +11,10 @@ except ModuleNotFoundError as exc:
         "Install it in the 'wall' environment first, then rerun this viewer."
     ) from exc
 
-from wall.domain.player import PlayerFrame, PlayerTimeline
 from wall.paths import awpy_maps_dir, resolve_asset_path
-from wall.render.round_pygame_effects import load_flash_eye_texture, mix_with_white
+from wall.render.round_pygame_effects import load_flash_eye_texture
 from wall.render.round_render import MAP_DATA, RoundData, game_to_pixel_axis, team_color
+from wall.viewer.player_frame import PlayerFramePresentation, assemble_player_frame_presentation
 from wall.viewer.render_bomb import (
     draw_carried_bomb_icon,
     draw_defuse_progress,
@@ -66,6 +65,96 @@ from wall.viewer.render_config import (
 from wall.viewer.render_sound import draw_sound_events
 from wall.viewer.render_utility import draw_flash_effects, draw_he_effects, draw_infernos, draw_smokes
 from wall.viewer.ui import tint_icon
+from wall.profile import profile_log
+
+
+PLAYER_WEAPON_ICON_COLOR = (230, 230, 230)
+PLAYER_WEAPON_ICON_ALPHA = 178
+DEFUSER_ICON_COLOR = team_color(3)
+
+PLAYER_WEAPON_ICON_PATHS = {
+    "AK-47": "icons/equipment/rifles/ak47.png",
+    "AUG": "icons/equipment/rifles/aug.png",
+    "AWP": "icons/equipment/rifles/awp.png",
+    "Bayonet": "icons/equipment/melee/bayonet.png",
+    "Bowie Knife": "icons/equipment/melee/knife_bowie.png",
+    "Butterfly Knife": "icons/equipment/melee/knife_butterfly.png",
+    "C4 Explosive": "icons/equipment/bomb/c4.png",
+    "Classic Knife": "icons/equipment/melee/knife_css.png",
+    "CZ75-Auto": "icons/equipment/pistols/cz75a.png",
+    "Decoy Grenade": "icons/equipment/grenades/decoy.png",
+    "Desert Eagle": "icons/equipment/pistols/deagle.png",
+    "Deagle": "icons/equipment/pistols/deagle.png",
+    "Dual Berettas": "icons/equipment/pistols/elite.png",
+    "Dualies": "icons/equipment/pistols/elite.png",
+    "FAMAS": "icons/equipment/rifles/famas.png",
+    "Falchion Knife": "icons/equipment/melee/knife_falchion.png",
+    "Five-SeveN": "icons/equipment/pistols/fiveseven.png",
+    "Five-seveN": "icons/equipment/pistols/fiveseven.png",
+    "Flashbang": "icons/equipment/grenades/flashbang.png",
+    "Flip Knife": "icons/equipment/melee/knife_flip.png",
+    "Galil AR": "icons/equipment/rifles/galilar.png",
+    "G3SG1": "icons/equipment/rifles/g3sg1.png",
+    "Glock-18": "icons/equipment/pistols/glock.png",
+    "Gut Knife": "icons/equipment/melee/knife_gut.png",
+    "Huntsman Knife": "icons/equipment/melee/knife_tactical.png",
+    "High Explosive Grenade": "icons/equipment/grenades/hegrenade.png",
+    "HE Grenade": "icons/equipment/grenades/hegrenade.png",
+    "Incendiary Grenade": "icons/equipment/grenades/incgrenade.png",
+    "Karambit": "icons/equipment/melee/knife_karambit.png",
+    "Kukri Knife": "icons/equipment/melee/knife_kukri.png",
+    "M4A1-S": "icons/equipment/rifles/m4a1_silencer.png",
+    "M4A1-S Silenced": "icons/equipment/rifles/m4a1_silencer.png",
+    "M4A4": "icons/equipment/rifles/m4a1.png",
+    "M9 Bayonet": "icons/equipment/melee/knife_m9_bayonet.png",
+    "MAC-10": "icons/equipment/smgs/mac10.png",
+    "MAG-7": "icons/equipment/heavy/mag7.png",
+    "M249": "icons/equipment/heavy/m249.png",
+    "MP5-SD": "icons/equipment/smgs/mp5sd.png",
+    "MP7": "icons/equipment/smgs/mp7.png",
+    "MP9": "icons/equipment/smgs/mp9.png",
+    "Molotov": "icons/equipment/grenades/molotov.png",
+    "Negev": "icons/equipment/heavy/negev.png",
+    "Navaja Knife": "icons/equipment/melee/knife_gypsy_jackknife.png",
+    "Nomad Knife": "icons/equipment/melee/knife_outdoor.png",
+    "Nova": "icons/equipment/heavy/nova.png",
+    "P2000": "icons/equipment/pistols/p2000.png",
+    "P250": "icons/equipment/pistols/p250.png",
+    "P90": "icons/equipment/smgs/p90.png",
+    "Paracord Knife": "icons/equipment/melee/knife_cord.png",
+    "PP-Bizon": "icons/equipment/smgs/bizon.png",
+    "PP-Bizon SMG": "icons/equipment/smgs/bizon.png",
+    "R8 Revolver": "icons/equipment/pistols/revolver.png",
+    "Sawed-Off": "icons/equipment/heavy/sawedoff.png",
+    "SCAR-20": "icons/equipment/rifles/scar20.png",
+    "SG 553": "icons/equipment/rifles/sg556.png",
+    "SG553": "icons/equipment/rifles/sg556.png",
+    "SSG 08": "icons/equipment/rifles/ssg08.png",
+    "Shadow Daggers": "icons/equipment/melee/knife_push.png",
+    "Skeleton Knife": "icons/equipment/melee/knife_skeleton.png",
+    "Smoke Grenade": "icons/equipment/grenades/smokegrenade.png",
+    "Scout": "icons/equipment/rifles/ssg08.png",
+    "Survival Knife": "icons/equipment/melee/knife_canis.png",
+    "Survival Bowie Knife": "icons/equipment/melee/knife_survival_bowie.png",
+    "Talon Knife": "icons/equipment/melee/knife_widowmaker.png",
+    "Tec-9": "icons/equipment/pistols/tec9.png",
+    "UMP-45": "icons/equipment/smgs/ump45.png",
+    "USP-S": "icons/equipment/pistols/usp_silencer.png",
+    "USP-S Silenced": "icons/equipment/pistols/usp_silencer.png",
+    "Ursus Knife": "icons/equipment/melee/knife_ursus.png",
+    "XM1014": "icons/equipment/heavy/xm1014.png",
+    "Zeus": "icons/equipment/gear/taser.png",
+    "Zeus x27": "icons/equipment/gear/taser.png",
+    "Healthshot": "icons/equipment/gear/healthshot.png",
+    "Medi-Shot": "icons/equipment/gear/healthshot.png",
+    "Stiletto Knife": "icons/equipment/melee/knife_stiletto.png",
+    "knife": "icons/equipment/melee/knife.png",
+    "knife_t": "icons/equipment/melee/knife_t.png",
+}
+
+
+def _normalize_weapon_icon_key(name: str) -> str:
+    return " ".join(name.strip().lower().replace("_", " ").split())
 
 
 class PygameRoundRenderer:
@@ -81,6 +170,8 @@ class PygameRoundRenderer:
         map_name: str | None,
         tickrate: float,
     ) -> None:
+        init_started_at = time.perf_counter()
+        profile_log("renderer.object_init.start", round_id=round_data.round_id, map_name=map_name)
         self.round_data = round_data
         self.round_ticks = round_data.round_ticks
         self.show_sound_effects = True
@@ -121,10 +212,19 @@ class PygameRoundRenderer:
         self.bomb_tracker = round_data.bomb_timeline
         self.sound_timeline = round_data.sound_timeline
 
+        asset_started_at = time.perf_counter()
+        profile_log("renderer.map_asset_load.start", round_id=self.round_id, map_name=self.map_name)
         self.background_original = self._load_background_image()
+        profile_log("renderer.map_asset_load.end", started_at=asset_started_at, round_id=self.round_id, map_name=self.map_name)
+        surface_started_at = time.perf_counter()
+        profile_log("renderer.surface_load.start", round_id=self.round_id, map_name=self.map_name)
         self.uses_map_background = self.background_original is not None and self.map_name in MAP_DATA and game_to_pixel_axis is not None
         self.background_surface = self._build_background_surface()
+        profile_log("renderer.surface_load.end", started_at=surface_started_at, round_id=self.round_id, map_name=self.map_name)
+        geometry_started_at = time.perf_counter()
+        profile_log("renderer.geometry_cache.start", round_id=self.round_id, map_name=self.map_name)
         self.bounds = self._compute_bounds()
+        profile_log("renderer.geometry_cache.end", started_at=geometry_started_at, round_id=self.round_id, map_name=self.map_name)
         self.font = pygame.font.SysFont("segoe ui", 18)
         self.player_number_font = pygame.font.SysFont("segoe ui", 11)
         self.small_font = pygame.font.SysFont("segoe ui", 14)
@@ -132,14 +232,17 @@ class PygameRoundRenderer:
         self.muzzle_flash_sprite = self._load_muzzle_flash_sprite()
         self.muzzle_flash_anchor = self._find_muzzle_flash_anchor(self.muzzle_flash_sprite)
         self.grenade_icons = self._load_grenade_icons()
+        self.player_weapon_icons = self._load_player_weapon_icons()
         self.he_animation_frames = self._load_he_animation_frames()
         self.fire_animation_layers = self._load_fire_animation_layers()
         self.soft_circle_masks: dict[tuple[int, int], pygame.Surface] = {}
         self.sound_ring_cache: dict[tuple[int, int, tuple[int, int, int], int], pygame.Surface] = {}
         self.c4_icons = self._load_c4_icons()
+        self.defuser_icon = self._load_defuser_icon()
         self.sound_toggle_icons = self._load_sound_toggle_icons()
         self.flash_eye_texture = load_flash_eye_texture()
         self.smoke_texture = self._build_smoke_texture()
+        profile_log("renderer.object_init.end", started_at=init_started_at, round_id=self.round_id, map_name=self.map_name)
 
     def _load_background_image(self) -> pygame.Surface | None:
         if not self.map_name:
@@ -149,16 +252,10 @@ class PygameRoundRenderer:
             return None
         return pygame.image.load(str(map_path)).convert()
 
-    def _player_timeline(self, player_name: str | None) -> PlayerTimeline | None:
+    def _player_timeline(self, player_name: str | None):
         if not player_name:
             return None
         return self.round_players.get_by_name(player_name)
-
-    def _player_frame(self, player_name: str | None, frame_tick: int) -> PlayerFrame | None:
-        timeline = self._player_timeline(player_name)
-        if timeline is None:
-            return None
-        return timeline.frame_at(frame_tick)
 
     def _get_soft_circle_mask(self, radius_px: int, inner_alpha: int) -> pygame.Surface:
         key = (radius_px, inner_alpha)
@@ -232,6 +329,92 @@ class PygameRoundRenderer:
             icons[filename] = pygame.transform.smoothscale(icon, scaled_size)
         return icons
 
+    def _load_player_weapon_icons(self) -> dict[str, pygame.Surface]:
+        icons: dict[str, pygame.Surface] = {}
+        target_height = 13
+        for weapon_name, filename in PLAYER_WEAPON_ICON_PATHS.items():
+            icon_path = resolve_asset_path(filename)
+            if not icon_path.exists():
+                continue
+            try:
+                base = pygame.image.load(str(icon_path)).convert_alpha()
+            except pygame.error:
+                continue
+            width, height = base.get_size()
+            if width <= 0 or height <= 0:
+                continue
+            scale = target_height / height
+            scaled_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+            icon = pygame.transform.smoothscale(base, scaled_size)
+            icon = tint_icon(icon, PLAYER_WEAPON_ICON_COLOR)
+            icon.set_alpha(PLAYER_WEAPON_ICON_ALPHA)
+            icons[weapon_name] = icon
+        return icons
+
+    def _player_weapon_icon(self, weapon_name: str) -> pygame.Surface | None:
+        if not weapon_name:
+            return None
+        icon = self.player_weapon_icons.get(weapon_name)
+        if icon is not None:
+            return icon
+        normalized = _normalize_weapon_icon_key(weapon_name)
+        for candidate_name, candidate_icon in self.player_weapon_icons.items():
+            if _normalize_weapon_icon_key(candidate_name) == normalized:
+                return candidate_icon
+        fallback_name = self._fallback_weapon_icon_name(normalized)
+        if not fallback_name:
+            return None
+        return self.player_weapon_icons.get(fallback_name)
+
+    def _fallback_weapon_icon_name(self, normalized_name: str) -> str | None:
+        if "c4" in normalized_name:
+            return "C4 Explosive"
+        if "healthshot" in normalized_name or "medi" in normalized_name:
+            return "Healthshot"
+        if "zeus" in normalized_name or "taser" in normalized_name:
+            return "Zeus x27"
+        if "flash" in normalized_name:
+            return "Flashbang"
+        if "smoke" in normalized_name:
+            return "Smoke Grenade"
+        if "molotov" in normalized_name:
+            return "Molotov"
+        if "incendiary" in normalized_name or "incgrenade" in normalized_name or "firebomb" in normalized_name:
+            return "Incendiary Grenade"
+        if "decoy" in normalized_name:
+            return "Decoy Grenade"
+        if "he grenade" in normalized_name or "hegrenade" in normalized_name or "high explosive" in normalized_name:
+            return "High Explosive Grenade"
+        if "grenade" in normalized_name:
+            return "High Explosive Grenade"
+        if any(
+            token in normalized_name
+            for token in (
+                "knife",
+                "bayonet",
+                "daggers",
+                "dagger",
+                "karambit",
+                "kukri",
+                "falchion",
+                "flip",
+                "gut",
+                "talon",
+                "ursus",
+                "stiletto",
+                "skeleton",
+                "bowie",
+                "navaja",
+                "nomad",
+                "paracord",
+                "survival",
+                "huntsman",
+                "classic",
+            )
+        ):
+            return "knife"
+        return None
+
     def _load_he_animation_frames(self) -> list[pygame.Surface]:
         frames: list[pygame.Surface] = []
         target_height = 60
@@ -294,6 +477,22 @@ class PygameRoundRenderer:
             "planted": tint_icon(base, C4_PLANTED_COLOR),
             "defused": tint_icon(base, C4_DEFUSED_COLOR),
         }
+
+    def _load_defuser_icon(self) -> pygame.Surface | None:
+        icon_path = resolve_asset_path("icons", "equipment", "gear", "defuser.png")
+        if not icon_path.exists():
+            return None
+        try:
+            icon = pygame.image.load(str(icon_path)).convert_alpha()
+        except pygame.error:
+            return None
+        width, height = icon.get_size()
+        if width <= 0 or height <= 0:
+            return None
+        target_height = 15
+        scale = target_height / height
+        scaled_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+        return tint_icon(pygame.transform.scale(icon, scaled_size), DEFUSER_ICON_COLOR)
 
     def _load_sound_toggle_icons(self) -> dict[str, pygame.Surface]:
         icons: dict[str, pygame.Surface] = {}
@@ -450,63 +649,48 @@ class PygameRoundRenderer:
             self._draw_sound_events(surface, frame_tick)
 
         for player in self.players:
-            timeline = self._player_timeline(player)
-            if timeline is None:
+            presentation = self._player_presentation(player, frame_tick)
+            if presentation is None:
                 continue
-            current = timeline.frame_at(frame_tick)
-            if current is None:
-                continue
-            base_color = team_color(current.team_num)
-            if self._is_dead(player, frame_tick):
-                self._draw_death_marker(surface, player, frame_tick, base_color)
-                death_position = self._death_position(player, frame_tick)
-                if death_position is not None:
-                    death_px, death_py = death_position
-                    draw_player_id_label(
-                        surface=surface,
-                        font=self.small_font,
-                        px=death_px,
-                        py=death_py,
-                        player_label=player,
-                        color=base_color,
-                    )
+            if not presentation.is_alive:
+                self._draw_player_death(surface, presentation)
                 continue
 
-            color = self._resolve_player_color(player, frame_tick, base_color)
-            overlay_state = timeline.overlay_state_at(frame_tick, damage_flash_duration_ticks=self.damage_flash_duration_ticks)
-            tail = timeline.frames_between(max(self.round_start_tick, frame_tick - self.trail + 1), frame_tick)
-            tail_points = [self.world_to_px(float(row.X), float(row.Y)) for row in tail.itertuples()]
+            tail_points = [self.world_to_px(x, y) for x, y in presentation.tail_world_points]
             if len(tail_points) >= 2:
-                pygame.draw.lines(surface, color, False, tail_points, 3)
-            px, py = self.world_to_px(current.x, current.y)
+                pygame.draw.lines(surface, presentation.draw_color, False, tail_points, 3)
+            px, py = self.world_to_px(*presentation.world_position)
             draw_facing_wedge(
                 surface=surface,
                 overlay_size=(self.width, self.height),
                 px=px,
                 py=py,
-                yaw=current.yaw,
+                yaw=presentation.yaw,
                 radius=self.world_dist_to_px(self.facing_radius),
                 facing_fov=self.facing_fov,
-                color=color,
+                color=presentation.draw_color,
             )
             draw_player(
                 surface=surface,
                 overlay_size=(self.width, self.height),
                 player_number_font=self.player_number_font,
                 small_font=self.small_font,
-                player_number=self.player_numbers[player],
+                player_number=presentation.player_number,
                 px=px,
                 py=py,
-                player=player,
-                color=color,
-                id_color=base_color,
-                team_num=current.team_num,
-                blind_strength=overlay_state.blind_strength,
+                player=presentation.player,
+                color=presentation.draw_color,
+                id_color=presentation.base_color,
+                team_num=presentation.team_num,
+                health=presentation.health,
+                blind_strength=presentation.blind_strength,
                 draw_carried_bomb_icon=self._draw_carried_bomb_icon,
+                draw_defuser_icon=self._draw_defuser_icon,
                 frame_tick=frame_tick,
+                weapon_icon=self._player_weapon_icon(presentation.weapon_name),
             )
-            self._draw_tracer_and_flash(surface, player, current, frame_tick)
-            self._draw_death_marker(surface, player, frame_tick, base_color)
+            self._draw_player_tracer_and_flash(surface, presentation)
+            self._draw_player_death(surface, presentation)
         self._draw_plant_attempts(surface, frame_tick)
         return surface
 
@@ -525,25 +709,6 @@ class PygameRoundRenderer:
         shadow_surface = self.title_font.render(title, True, (10, 10, 10))
         surface.blit(shadow_surface, (18, 18))
         surface.blit(text_surface, (16, 16))
-
-    def _draw_death_marker(self, surface: pygame.Surface, player: str, frame_tick: int, color: tuple[int, int, int]) -> None:
-        timeline = self._player_timeline(player)
-        if timeline is None:
-            return
-        position = timeline.death_position_at(frame_tick)
-        if position is None:
-            return
-        px, py = self.world_to_px(float(position[0]), float(position[1]))
-        draw_death_marker(surface=surface, px=px, py=py, color=color)
-
-    def _death_position(self, player: str, frame_tick: int) -> tuple[float, float] | None:
-        timeline = self._player_timeline(player)
-        if timeline is None:
-            return None
-        position = timeline.death_position_at(frame_tick)
-        if position is None:
-            return None
-        return self.world_to_px(float(position[0]), float(position[1]))
 
     def _draw_grenades(self, surface: pygame.Surface, frame_tick: int) -> None:
         if not self.utility_timeline.has_grenade_trails():
@@ -705,18 +870,58 @@ class PygameRoundRenderer:
             blit_icon_with_shadow=self._blit_icon_with_shadow,
         )
 
-    def _draw_tracer_and_flash(self, surface: pygame.Surface, player: str, current: PlayerFrame, frame_tick: int) -> None:
-        fire_event = self._latest_fire_event(player, frame_tick)
-        if fire_event is None:
+    def _draw_defuser_icon(self, surface: pygame.Surface, player: str, center: tuple[int, int], frame_tick: int) -> None:
+        if self.defuser_icon is None:
             return
-        fire_tick = int(fire_event["tick"])
-        elapsed = frame_tick - fire_tick
-        if elapsed < 0 or elapsed > self.fire_flash_duration_ticks:
+        timeline = self._player_timeline(player)
+        frame = None if timeline is None else timeline.frame_at(frame_tick)
+        if frame is None or not frame.has_defuser or frame.team_num != 3:
             return
-        px, py = self.world_to_px(current.x, current.y)
-        yaw = current.yaw
+        self._blit_icon_with_shadow(surface, self.defuser_icon, (center[0] - 8, center[1] + 8))
+
+    def _player_presentation(self, player: str, frame_tick: int) -> PlayerFramePresentation | None:
+        timeline = self._player_timeline(player)
+        if timeline is None:
+            return None
+        current = timeline.frame_at(frame_tick)
+        if current is None:
+            return None
+        return assemble_player_frame_presentation(
+            player=player,
+            player_number=self.player_numbers[player],
+            frame_tick=frame_tick,
+            timeline=timeline,
+            round_players=self.round_players,
+            round_start_tick=self.round_start_tick,
+            trail=self.trail,
+            damage_flash_duration_ticks=self.damage_flash_duration_ticks,
+            fire_flash_duration_ticks=self.fire_flash_duration_ticks,
+            hit_match_window_ticks=self.hit_match_window_ticks,
+            base_color=team_color(current.team_num),
+        )
+
+    def _draw_player_death(self, surface: pygame.Surface, presentation: PlayerFramePresentation) -> None:
+        if presentation.death is None:
+            return
+        death_px, death_py = self.world_to_px(*presentation.death.world_position)
+        draw_death_marker(surface=surface, px=death_px, py=death_py, color=presentation.base_color)
+        draw_player_id_label(
+            surface=surface,
+            font=self.small_font,
+            px=death_px,
+            py=death_py,
+            player_label=presentation.death.label,
+            color=presentation.base_color,
+        )
+
+    def _draw_player_tracer_and_flash(self, surface: pygame.Surface, presentation: PlayerFramePresentation) -> None:
+        tracer = presentation.tracer
+        if tracer is None:
+            return
+        px, py = self.world_to_px(*presentation.world_position)
+        yaw = tracer.yaw
         muzzle_px, muzzle_py = offset_point(px, py, yaw, 8.0)
-        self._draw_tracer_line(surface, fire_event, muzzle_px, muzzle_py, yaw)
+        self._draw_player_tracer_line(surface, tracer=tracer, start_x=muzzle_px, start_y=muzzle_py)
         draw_muzzle_flash(
             surface=surface,
             muzzle_flash_sprite=self.muzzle_flash_sprite,
@@ -724,21 +929,19 @@ class PygameRoundRenderer:
             muzzle_px=muzzle_px,
             muzzle_py=muzzle_py,
             yaw=yaw,
-            fade=1.0 - (elapsed / self.fire_flash_duration_ticks),
+            fade=tracer.flash_fade,
             scale_reference_px=self.world_dist_to_px(48.0),
         )
 
-    def _draw_tracer_line(self, surface: pygame.Surface, fire_event: pd.Series, start_x: float, start_y: float, yaw: float) -> None:
-        hit_point = self._resolve_hit_point(fire_event)
-        if hit_point is None:
+    def _draw_player_tracer_line(self, surface: pygame.Surface, *, tracer, start_x: float, start_y: float) -> None:
+        if tracer.hit_position_world is None:
             tracer_length = max(48.0, self.world_dist_to_px(320.0))
-            end_x, end_y = offset_point(start_x, start_y, yaw, tracer_length)
+            end_x, end_y = offset_point(start_x, start_y, tracer.yaw, tracer_length)
         else:
-            end_x, end_y = self.world_to_px(*hit_point)
-        team_num = pd.to_numeric(fire_event.get("team_num"), errors="coerce")
-        if team_num == 2:
+            end_x, end_y = self.world_to_px(*tracer.hit_position_world)
+        if tracer.team_num == 2:
             tracer_color = TRACER_T_COLOR
-        elif team_num == 3:
+        elif tracer.team_num == 3:
             tracer_color = TRACER_CT_COLOR
         else:
             tracer_color = TRACER_NEUTRAL_COLOR
@@ -751,50 +954,3 @@ class PygameRoundRenderer:
             end_y=end_y,
             tracer_color=tracer_color,
         )
-
-    def _latest_fire_event(self, player: str, frame_tick: int) -> pd.Series | None:
-        timeline = self._player_timeline(player)
-        if timeline is None:
-            return None
-        return timeline.latest_fire_event(frame_tick)
-
-    def _resolve_hit_point(self, fire_event: pd.Series) -> tuple[float, float] | None:
-        attacker_timeline = self.round_players.get_by_steamid(str(fire_event.get("user_steamid", "")).strip())
-        if attacker_timeline is None:
-            attacker_timeline = self._player_timeline(str(fire_event.get("user_name", "")))
-        if attacker_timeline is None:
-            return None
-        return attacker_timeline.resolve_hit_position_for_fire_event(
-            fire_event,
-            max_tick=int(fire_event["tick"]) + self.hit_match_window_ticks,
-            victim_position_lookup=self._extract_hurt_world_xy,
-        )
-
-    def _extract_hurt_world_xy(self, hurt_event: pd.Series) -> tuple[float, float] | None:
-        victim_name = hurt_event.get("user_name")
-        if pd.isna(victim_name):
-            return None
-        hurt_tick = int(hurt_event["tick"])
-        frame = self._player_frame(str(victim_name), hurt_tick)
-        if frame is None:
-            return None
-        return (frame.x, frame.y)
-
-    def _is_dead(self, player: str, frame_tick: int) -> bool:
-        timeline = self._player_timeline(player)
-        return timeline is not None and not timeline.is_alive_at(frame_tick)
-
-    def _resolve_player_color(self, player: str, frame_tick: int, base_color: tuple[int, int, int]) -> tuple[int, int, int]:
-        color = base_color
-        timeline = self._player_timeline(player)
-        if timeline is None:
-            return color
-        overlay_state = timeline.overlay_state_at(frame_tick, damage_flash_duration_ticks=self.damage_flash_duration_ticks)
-        if overlay_state.damage_flash_fade > 0.0:
-            color = tuple(
-                int(round((1.0 - overlay_state.damage_flash_fade) * base_channel + overlay_state.damage_flash_fade * overlay_channel))
-                for base_channel, overlay_channel in zip(color, (220, 48, 48))
-            )
-        if overlay_state.blind_strength > 0.0:
-            color = mix_with_white(color, overlay_state.blind_strength * 0.88)
-        return color

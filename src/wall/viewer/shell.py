@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import bisect
 from pathlib import Path
+import time
+from typing import Literal
 
 try:
     import pygame
@@ -12,6 +15,8 @@ except ModuleNotFoundError as exc:
 
 from wall.paths import awpy_maps_dir, resolve_asset_path
 from wall.render.round_render import team_color
+from wall.dataset.index import DatasetIndex
+from wall.profile import profile_log
 from wall.viewer.config import (
     ACCENT_COLOR,
     BACKGROUND_COLOR,
@@ -25,9 +30,9 @@ from wall.viewer.config import (
     TEXT_COLOR,
 )
 from wall.viewer.layout import build_round_dropdown_overlay
+from wall.viewer.loading import ViewerDatasetLoader, ViewerLoadState
 from wall.viewer.renderer import PygameRoundRenderer
 from wall.viewer.runtime import ViewerRoundRuntime
-from wall.viewer.session import LoadedViewerData
 from wall.viewer.state import PlaybackState, RoundDropdownState
 from wall.viewer.ui import SidebarPlayerEntry, draw_bottom_bar, draw_sidebar, format_hud_number
 
@@ -43,18 +48,28 @@ class PygameRoundViewer:
         frame_step: int,
         tickrate: float,
     ) -> None:
+        init_started_at = time.perf_counter()
+        profile_log("viewer.init.start")
         pygame.init()
         pygame.font.init()
         self.data_dir = data_dir
         self.fps = fps
         self.tickrate = tickrate
         self.frame_step = max(1, frame_step)
-        self.loaded_data = LoadedViewerData.from_data_dir(data_dir)
-        self.map_width, self.map_height = self._resolve_map_viewport_size(map_width, map_height)
-        self.screen = pygame.display.set_mode((self.map_width + SIDEBAR_WIDTH, self.map_height + BOTTOM_BAR_HEIGHT))
+        self.initial_map_width = map_width
+        self.initial_map_height = map_height
+        self.initial_round_id = initial_round_id
+        self.loaded_data: DatasetIndex | None = None
+        self.runtime: ViewerRoundRuntime | None = None
+        self.player_numbers: dict[str, int] = {}
+        self.map_width = map_width
+        self.map_height = map_height
+        self.screen = pygame.display.set_mode(
+            (self.map_width + SIDEBAR_WIDTH, self.map_height + BOTTOM_BAR_HEIGHT),
+            pygame.RESIZABLE,
+        )
         pygame.display.set_caption("wall pygame viewer")
         self.clock = pygame.time.Clock()
-        self.player_numbers = self.loaded_data.build_demo_hud_numbers()
         self.playback = PlaybackState()
         self.show_sound_effects = True
         self.max_cached_frames = 240
@@ -66,17 +81,17 @@ class PygameRoundViewer:
         self.round_item_rects: dict[int, pygame.Rect] = {}
         self.speed_rects: dict[float, pygame.Rect] = {}
         self.round_dropdown = RoundDropdownState()
-        self.runtime = ViewerRoundRuntime(
-            loaded_data=self.loaded_data,
-            initial_round_id=initial_round_id,
-            frame_step=self.frame_step,
-            tickrate=self.tickrate,
-            max_cached_frames=self.max_cached_frames,
-            renderer_factory=self._build_renderer,
-        )
-        self.select_round(self.selected_round_id)
+        self.dataset_loader = ViewerDatasetLoader(self.data_dir)
+        self.load_state: ViewerLoadState[DatasetIndex] = self.dataset_loader.state
+        self.startup_stage: Literal["waiting_for_dataset", "select_round", "cache_first_frame", "ready", "failed"] = "waiting_for_dataset"
+        self.loading_message = "Loading dataset"
+        self.pending_resize_dimensions: tuple[int, int] | None = None
+        self.resize_rebuild_pending = False
+        profile_log("viewer.init.end", started_at=init_started_at)
 
     def _resolve_map_viewport_size(self, target_width: int, target_height: int) -> tuple[int, int]:
+        if self.loaded_data is None:
+            return target_width, target_height
         map_name = self.loaded_data.map_name
         if not map_name:
             return target_width, target_height
@@ -97,21 +112,34 @@ class PygameRoundViewer:
 
     @property
     def round_ids(self) -> list[int]:
+        if self.runtime is None:
+            return []
         return self.runtime.round_ids
 
     @property
     def selected_round_id(self) -> int:
+        if self.runtime is None:
+            if self.initial_round_id is not None:
+                return int(self.initial_round_id)
+            raise ValueError("Viewer round selection is not ready yet.")
         return self.runtime.selected_round_id
 
     @property
     def round_cache(self):
+        if self.runtime is None:
+            return None
         return self.runtime.round_cache
 
     def _build_renderer(self, round_id: int) -> PygameRoundRenderer:
         # IMPORTANT: shell owns orchestration and wiring only.
         # Semantic assembly stays in session/domain, while draw behavior stays in renderer.
+        renderer_started_at = time.perf_counter()
+        profile_log("renderer.init.start", round_id=round_id, map_name=None if self.loaded_data is None else self.loaded_data.map_name)
+        self.player_numbers = self.loaded_data.build_demo_hud_numbers(round_id)
+        profile_log("dataset.build_round_data.before_call", round_id=round_id, map_name=None if self.loaded_data is None else self.loaded_data.map_name)
         round_data = self.loaded_data.build_round_data(round_id, tickrate=self.tickrate)
-        return PygameRoundRenderer(
+        profile_log("renderer.round_data.ready", started_at=renderer_started_at, round_id=round_id, map_name=None if self.loaded_data is None else self.loaded_data.map_name)
+        renderer = PygameRoundRenderer(
             round_data=round_data,
             player_numbers=self.player_numbers,
             width=self.map_width,
@@ -122,51 +150,162 @@ class PygameRoundViewer:
             map_name=self.loaded_data.map_name,
             tickrate=self.tickrate,
         )
+        profile_log("renderer.init.end", started_at=renderer_started_at, round_id=round_id, map_name=self.loaded_data.map_name)
+        return renderer
 
-    def select_round(self, round_id: int) -> None:
+    def _apply_window_size(self, window_width: int, window_height: int) -> None:
+        self.pending_resize_dimensions = (int(window_width), int(window_height))
+
+    def _flush_pending_window_size(self) -> None:
+        if self.pending_resize_dimensions is None:
+            return
+        window_width, window_height = self.pending_resize_dimensions
+        self.pending_resize_dimensions = None
+        requested_map_width = max(320, int(window_width) - SIDEBAR_WIDTH)
+        requested_map_height = max(240, int(window_height) - BOTTOM_BAR_HEIGHT)
+        self.map_width, self.map_height = self._resolve_map_viewport_size(requested_map_width, requested_map_height)
+        self.screen = pygame.display.set_mode(
+            (self.map_width + SIDEBAR_WIDTH, self.map_height + BOTTOM_BAR_HEIGHT),
+            pygame.RESIZABLE,
+        )
+        self.resize_rebuild_pending = self.round_cache is not None
+
+    def _rebuild_after_resize_if_needed(self) -> None:
+        if not self.resize_rebuild_pending or self.round_cache is None or self.runtime is None:
+            self.resize_rebuild_pending = False
+            return
+        selected_round_id = self.selected_round_id
+        current_tick = self.round_cache.frame_ticks[self.playback.current_frame_index]
+        was_playing = self.playback.playing
+        self.runtime.select_round(selected_round_id, show_sound_effects=self.show_sound_effects)
+        frame_ticks = self.round_cache.frame_ticks
+        frame_index = max(0, bisect.bisect_right(frame_ticks, current_tick) - 1)
+        self.playback.set_frame_index(frame_index, frame_ticks)
+        self.playback.current_playback_tick = float(current_tick)
+        self.playback.playing = was_playing
+        self._ensure_cached(self.playback.current_frame_index)
+        self.resize_rebuild_pending = False
+
+    def select_round(self, round_id: int, *, cache_first_frame: bool = True) -> None:
+        if self.runtime is None:
+            raise RuntimeError("Viewer runtime is not ready yet.")
+        select_started_at = time.perf_counter()
+        profile_log("viewer.select_round.start", round_id=round_id, map_name=None if self.loaded_data is None else self.loaded_data.map_name)
         self.round_dropdown.close()
         selected_index = self.round_ids.index(round_id)
         self.round_dropdown.align_to_selected(selected_index, len(self.round_ids))
         self.runtime.select_round(round_id, show_sound_effects=self.show_sound_effects)
         self.playback.reset(self.round_cache.frame_ticks)
-        self.runtime.ensure_cached(0)
+        if cache_first_frame:
+            profile_log("viewer.first_frame_cache.start", round_id=round_id, map_name=None if self.loaded_data is None else self.loaded_data.map_name)
+            self.runtime.ensure_cached(0)
+            profile_log("viewer.first_frame_cache.end", round_id=round_id, map_name=None if self.loaded_data is None else self.loaded_data.map_name)
+        profile_log("viewer.select_round.end", started_at=select_started_at, round_id=round_id, map_name=None if self.loaded_data is None else self.loaded_data.map_name)
 
     def _ensure_cached(self, frame_index: int) -> None:
+        if self.runtime is None:
+            return
         self.runtime.ensure_cached(frame_index)
+
+    def _install_loaded_dataset(self, loaded_data: DatasetIndex) -> None:
+        self.loaded_data = loaded_data
+        self.runtime = ViewerRoundRuntime(
+            loaded_data=self.loaded_data,
+            initial_round_id=self.initial_round_id,
+            frame_step=self.frame_step,
+            tickrate=self.tickrate,
+            max_cached_frames=self.max_cached_frames,
+            renderer_factory=self._build_renderer,
+        )
+        self.pending_resize_dimensions = self.screen.get_size()
+        self._flush_pending_window_size()
+        self.startup_stage = "select_round"
+        profile_log("viewer.dataset_ready", note=f"rounds={len(self.runtime.round_ids)}")
+
+    def _advance_startup(self) -> None:
+        if self.startup_stage == "waiting_for_dataset":
+            self.dataset_loader.start()
+            self.load_state = self.dataset_loader.poll()
+            if self.load_state.status == "loading":
+                self.loading_message = "Loading dataset"
+                return
+            if self.load_state.status == "failed":
+                self.loading_message = f"Loading failed: {type(self.load_state.error).__name__}"
+                self.startup_stage = "failed"
+                return
+            if self.load_state.status == "complete":
+                assert self.load_state.value is not None
+                self._install_loaded_dataset(self.load_state.value)
+                return
+        if self.startup_stage == "select_round":
+            self.loading_message = "Preparing initial round"
+            self.select_round(self.selected_round_id, cache_first_frame=False)
+            self.startup_stage = "cache_first_frame"
+            profile_log("viewer.initial_round_selected", round_id=self.selected_round_id)
+            return
+        if self.startup_stage == "cache_first_frame":
+            self.loading_message = "Rendering first frame"
+            profile_log("viewer.first_frame_cache.start", round_id=self.selected_round_id, map_name=None if self.loaded_data is None else self.loaded_data.map_name)
+            self._ensure_cached(0)
+            profile_log("viewer.first_frame_cache.end", round_id=self.selected_round_id, map_name=None if self.loaded_data is None else self.loaded_data.map_name)
+            self.startup_stage = "ready"
+            self.loading_message = "Ready"
+            profile_log("viewer.first_frame_ready", round_id=self.selected_round_id)
+
+    def _draw_loading(self) -> None:
+        self.screen.fill(BACKGROUND_COLOR)
+        title = self.font.render("wall viewer", True, TEXT_COLOR)
+        message = self.small_font.render(self.loading_message, True, MUTED_TEXT_COLOR)
+        title_rect = title.get_rect(center=(self.screen.get_width() // 2, self.screen.get_height() // 2 - 14))
+        message_rect = message.get_rect(center=(self.screen.get_width() // 2, self.screen.get_height() // 2 + 14))
+        self.screen.blit(title, title_rect)
+        self.screen.blit(message, message_rect)
 
     def run(self) -> None:
         running = True
-        while running:
-            dt_seconds = self.clock.tick(self.fps) / 1000.0
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-                elif event.type == pygame.KEYDOWN:
-                    running = self._handle_keydown(event)
-                elif event.type == pygame.MOUSEBUTTONDOWN:
-                    button = getattr(event, "button", None)
-                    if button == 4:
-                        self._handle_mousewheel(1, event.pos)
-                    elif button == 5:
-                        self._handle_mousewheel(-1, event.pos)
-                    elif button == 1:
-                        self._handle_mouse_down(event.pos)
-                elif event.type == pygame.MOUSEWHEEL:
-                    self._handle_mousewheel(event.y, pygame.mouse.get_pos())
-                elif event.type == pygame.MOUSEBUTTONUP:
-                    self.playback.dragging_timeline = False
-                    self.round_dropdown.dragging_scroll = False
-                elif event.type == pygame.MOUSEMOTION:
-                    if self.playback.dragging_timeline:
-                        self._update_timeline_from_mouse(event.pos)
-                    elif self.round_dropdown.dragging_scroll:
-                        self._update_round_scroll_from_mouse(event.pos)
+        try:
+            while running:
+                dt_seconds = self.clock.tick(self.fps) / 1000.0
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        running = False
+                    elif event.type == pygame.KEYDOWN:
+                        running = self._handle_keydown(event)
+                    elif event.type == pygame.MOUSEBUTTONDOWN:
+                        button = getattr(event, "button", None)
+                        if button == 4:
+                            self._handle_mousewheel(1, event.pos)
+                        elif button == 5:
+                            self._handle_mousewheel(-1, event.pos)
+                        elif button == 1:
+                            self._handle_mouse_down(event.pos)
+                    elif event.type == pygame.MOUSEWHEEL:
+                        self._handle_mousewheel(event.y, pygame.mouse.get_pos())
+                    elif event.type == pygame.MOUSEBUTTONUP:
+                        self.playback.dragging_timeline = False
+                        self.round_dropdown.dragging_scroll = False
+                    elif event.type == pygame.MOUSEMOTION:
+                        if self.playback.dragging_timeline:
+                            self._update_timeline_from_mouse(event.pos)
+                        elif self.round_dropdown.dragging_scroll:
+                            self._update_round_scroll_from_mouse(event.pos)
+                    elif event.type == pygame.VIDEORESIZE:
+                        self._apply_window_size(event.w, event.h)
+                    elif hasattr(pygame, "WINDOWSIZECHANGED") and event.type == pygame.WINDOWSIZECHANGED:
+                        self._apply_window_size(event.x, event.y)
 
-            if self.playback.playing and self.round_cache is not None:
-                self._advance_playback(dt_seconds)
-            self._draw()
-            pygame.display.flip()
-        pygame.quit()
+                self._flush_pending_window_size()
+                if self.startup_stage not in {"ready", "failed"}:
+                    self._advance_startup()
+                elif self.resize_rebuild_pending:
+                    self._rebuild_after_resize_if_needed()
+                if self.startup_stage == "ready" and self.playback.playing and self.round_cache is not None:
+                    self._advance_playback(dt_seconds)
+                self._draw()
+                pygame.display.flip()
+        finally:
+            self.dataset_loader.shutdown()
+            pygame.quit()
 
     def _handle_keydown(self, event: pygame.event.Event) -> bool:
         if event.key == pygame.K_ESCAPE:
@@ -318,23 +457,35 @@ class PygameRoundViewer:
         self.round_cache.cache.clear()
         self._ensure_cached(self.playback.current_frame_index)
 
+    def _content_origin(self) -> tuple[int, int]:
+        screen_width, screen_height = self.screen.get_size()
+        content_width = self.map_width + SIDEBAR_WIDTH
+        content_height = self.map_height + BOTTOM_BAR_HEIGHT
+        origin_x = max(0, (screen_width - content_width) // 2)
+        origin_y = max(0, (screen_height - content_height) // 2)
+        return origin_x, origin_y
+
     def _draw(self) -> None:
+        if self.startup_stage != "ready":
+            self._draw_loading()
+            return
         self.screen.fill(BACKGROUND_COLOR)
+        content_origin_x, content_origin_y = self._content_origin()
         if self.round_cache is not None:
             self._ensure_cached(self.playback.current_frame_index)
             map_surface = self.round_cache.cache[self.playback.current_frame_index]
-            self.screen.blit(map_surface, (0, 0))
-        self._draw_sidebar()
-        self._draw_bottom_bar()
+            self.screen.blit(map_surface, (content_origin_x, content_origin_y))
+        self._draw_sidebar(content_origin_x=content_origin_x, content_origin_y=content_origin_y)
+        self._draw_bottom_bar(content_origin_x=content_origin_x, content_origin_y=content_origin_y)
 
-    def _draw_sidebar(self) -> None:
+    def _draw_sidebar(self, *, content_origin_x: int, content_origin_y: int) -> None:
         self.button_rects = {key: value for key, value in self.button_rects.items() if key == "timeline"}
         self.round_item_rects = {}
         self.speed_rects = {}
         self.round_dropdown.reset_layout()
         dropdown_overlay = build_round_dropdown_overlay(
-            origin_x=self.map_width + 16,
-            origin_y=110,
+            origin_x=content_origin_x + self.map_width + 16,
+            origin_y=content_origin_y + 110,
             width=SIDEBAR_WIDTH - 32,
             round_ids=self.round_ids,
             selected_round_id=self.selected_round_id,
@@ -347,13 +498,15 @@ class PygameRoundViewer:
         relative_seconds = relative_tick / self.tickrate if self.tickrate > 0 else 0.0
         player_entries = [
             SidebarPlayerEntry(
-                label=f"{format_hud_number(self.round_cache.renderer.player_numbers[player])}. {player}",
-                color=team_color(self._latest_team_num(player)),
+                label=self._sidebar_player_label(player, current_tick),
+                color=team_color(self._team_num_at_tick(player, current_tick)),
             )
             for player in self.round_cache.renderer.players
         ]
         sidebar = draw_sidebar(
             screen=self.screen,
+            content_origin_x=content_origin_x,
+            content_origin_y=content_origin_y,
             map_width=self.map_width,
             map_height=self.map_height,
             sidebar_width=SIDEBAR_WIDTH,
@@ -387,15 +540,19 @@ class PygameRoundViewer:
         self.round_item_rects = sidebar.round_item_rects
         self.speed_rects = sidebar.speed_rects
 
-    def _latest_team_num(self, player: str) -> int | float | None:
+    def _team_num_at_tick(self, player: str, frame_tick: int) -> int | float | None:
         if self.round_cache is None:
             return None
         timeline = self.round_cache.renderer._player_timeline(player)
         if timeline is None:
             return None
-        return timeline.team_at(self.round_cache.frame_ticks[-1])
+        return timeline.team_at(frame_tick)
 
-    def _draw_bottom_bar(self) -> None:
+    def _sidebar_player_label(self, player: str, frame_tick: int) -> str:
+        number = format_hud_number(self.round_cache.renderer.player_numbers[player])
+        return f"{number}. {player}"
+
+    def _draw_bottom_bar(self, *, content_origin_x: int, content_origin_y: int) -> None:
         if self.round_cache is None:
             return
         progress_ratio = 0.0
@@ -403,6 +560,8 @@ class PygameRoundViewer:
             progress_ratio = self.playback.current_frame_index / (len(self.round_cache.frame_ticks) - 1)
         timeline_rect = draw_bottom_bar(
             screen=self.screen,
+            content_origin_x=content_origin_x,
+            content_origin_y=content_origin_y,
             map_width=self.map_width,
             map_height=self.map_height,
             bottom_bar_height=BOTTOM_BAR_HEIGHT,

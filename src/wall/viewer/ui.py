@@ -129,6 +129,8 @@ def draw_round_dropdown_overlay(
 def draw_sidebar(
     *,
     screen: pygame.Surface,
+    content_origin_x: int,
+    content_origin_y: int,
     map_width: int,
     map_height: int,
     sidebar_width: int,
@@ -158,13 +160,13 @@ def draw_sidebar(
     speed_label_formatter,
     player_entries: list[SidebarPlayerEntry],
 ) -> SidebarRenderResult:
-    sidebar_rect = pygame.Rect(map_width, 0, sidebar_width, map_height + bottom_bar_height)
+    sidebar_rect = pygame.Rect(content_origin_x + map_width, content_origin_y, sidebar_width, map_height + bottom_bar_height)
     pygame.draw.rect(screen, sidebar_color, sidebar_rect)
     button_rects: dict[str, pygame.Rect] = {}
     round_item_rects: dict[int, pygame.Rect] = {}
     speed_rects: dict[float, pygame.Rect] = {}
-    x = map_width + 16
-    y = 16
+    x = content_origin_x + map_width + 16
+    y = content_origin_y + 16
 
     title = font.render("Controls", True, text_color)
     screen.blit(title, (x, y))
@@ -266,6 +268,8 @@ def draw_sidebar(
 def draw_bottom_bar(
     *,
     screen: pygame.Surface,
+    content_origin_x: int,
+    content_origin_y: int,
     map_width: int,
     map_height: int,
     bottom_bar_height: int,
@@ -276,9 +280,9 @@ def draw_bottom_bar(
     tickrate: float,
     progress_ratio: float,
 ) -> pygame.Rect:
-    bar_rect = pygame.Rect(0, map_height, map_width, bottom_bar_height)
+    bar_rect = pygame.Rect(content_origin_x, content_origin_y + map_height, map_width, bottom_bar_height)
     pygame.draw.rect(screen, (24, 24, 24), bar_rect)
-    timeline_rect = pygame.Rect(16, map_height + 20, map_width - 32, 16)
+    timeline_rect = pygame.Rect(content_origin_x + 16, content_origin_y + map_height + 20, map_width - 32, 16)
     pygame.draw.rect(screen, (70, 70, 70), timeline_rect, border_radius=8)
     fill_width = int(round(timeline_rect.width * progress_ratio))
     pygame.draw.rect(
@@ -288,5 +292,5 @@ def draw_bottom_bar(
         border_radius=8,
     )
     speed_text = small_font.render(f"{speed_label} | tickrate {tickrate:g}", True, muted_text_color)
-    screen.blit(speed_text, (16, map_height + 42))
+    screen.blit(speed_text, (content_origin_x + 16, content_origin_y + map_height + 42))
     return timeline_rect

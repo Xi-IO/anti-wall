@@ -11,9 +11,26 @@ from demoparser2 import DemoParser
 from wall.domain.weapon_overrides import WEAPON_OVERRIDES
 from wall.domain.weapons import find_weapon_spec, load_base_weapon_specs, merge_weapon_specs
 from wall.io.table_io import DEFAULT_TABLE_FORMAT, write_table
+from wall.output import progress_enabled, print_status
 
 
 WEAPON_SPECS = merge_weapon_specs(load_base_weapon_specs(), WEAPON_OVERRIDES)
+
+
+def _render_progress_line(label: str, current: int, total: int, *, detail: str | None = None) -> str:
+    resolved_total = max(1, int(total))
+    resolved_current = max(0, min(int(current), resolved_total))
+    width = 20
+    filled = int(round((resolved_current / resolved_total) * width))
+    bar = "#" * filled + "-" * (width - filled)
+    suffix = f"  {detail}" if detail else ""
+    return f"{label:<10} [{bar}] {resolved_current}/{resolved_total}{suffix}"
+
+
+def _print_parse_progress(current: int, total: int, detail: str) -> None:
+    if not progress_enabled():
+        return
+    print(_render_progress_line("parsing", current, total, detail=detail), flush=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
             "health",
             "team_num",
             "player_name",
+            "active_weapon_name",
+            "has_defuser",
             "total_rounds_played",
             "ducking",
             "is_airborne",
@@ -92,9 +111,12 @@ def main(argv: list[str] | None = None) -> None:
     if not args.demo.exists():
         raise FileNotFoundError(f"Demo not found: {args.demo}")
 
+    total_stages = 6
+    _print_parse_progress(1, total_stages, f"Reading demo {args.demo.name}")
     demo = DemoParser(str(args.demo))
     header = demo.parse_header()
 
+    _print_parse_progress(2, total_stages, "Parsing event tables")
     deaths = normalize_event_table(demo.parse_event(
         "player_death",
         player=["X", "Y", "Z", "yaw", "pitch", "player_name", "player_steamid"],
@@ -172,7 +194,11 @@ def main(argv: list[str] | None = None) -> None:
         "inferno_startburn",
     ))
     grenades = normalize_event_table(demo.parse_grenades())
+
+    _print_parse_progress(3, total_stages, "Parsing tick frames")
     ticks = demo.parse_ticks(args.tick_fields)
+
+    _print_parse_progress(4, total_stages, "Building round and sound tables")
     jump_by_tick, round_start_ticks = infer_round_boundaries(
         ticks,
         jump_threshold=args.jump_threshold,
@@ -235,6 +261,7 @@ def main(argv: list[str] | None = None) -> None:
 
     output_dir = args.output_dir / args.demo.stem
     output_dir.mkdir(parents=True, exist_ok=True)
+    _print_parse_progress(5, total_stages, f"Writing dataset {output_dir}")
 
     metadata_json = output_dir / "metadata.json"
     saved_paths = {
@@ -304,37 +331,18 @@ def main(argv: list[str] | None = None) -> None:
         saved_paths=saved_paths,
     )
     metadata_json.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    _print_parse_progress(6, total_stages, "Done")
 
-    print(f"Demo: {args.demo}")
-    print(f"Map: {header.get('map_name', 'unknown')}")
-    print_summary("player_death", deaths, saved_paths["player_death"])
-    print_summary("fire_bullets", fires, saved_paths["fire_bullets"])
-    print_summary("player_hurt", hurts, saved_paths["player_hurt"])
-    print_summary("player_bullet_hit", hits, saved_paths["player_bullet_hit"])
-    print_summary("item_drop", item_drops, saved_paths["item_drop"])
-    print_summary("item_pickup", item_pickups, saved_paths["item_pickup"])
-    print_summary("weapon_reload", weapon_reloads, saved_paths["weapon_reload"])
-    print_summary("weapon_zoom", weapon_zooms, saved_paths["weapon_zoom"])
-    print_summary("player_footstep", footsteps, saved_paths["player_footstep"])
-    print_summary("smokegrenade_detonate", smoke_detonates, saved_paths["smokegrenade_detonate"])
-    print_summary("flashbang_detonate", flash_detonates, saved_paths["flashbang_detonate"])
-    print_summary("hegrenade_detonate", he_detonates, saved_paths["hegrenade_detonate"])
-    print_summary("player_blind", blinds, saved_paths["player_blind"])
-    print_summary("bomb_pickup", bomb_pickups, saved_paths["bomb_pickup"])
-    print_summary("bomb_dropped", bomb_drops, saved_paths["bomb_dropped"])
-    print_summary("bomb_beginplant", bomb_begin_plants, saved_paths["bomb_beginplant"])
-    print_summary("bomb_planted", bomb_plants, saved_paths["bomb_planted"])
-    print_summary("bomb_defused", bomb_defuses, saved_paths["bomb_defused"])
-    print_summary("bomb_begindefuse", bomb_begin_defuses, saved_paths["bomb_begindefuse"])
-    print_summary("bomb_abortdefuse", bomb_abort_defuses, saved_paths["bomb_abortdefuse"])
-    print_summary("bomb_exploded", bomb_explodes, saved_paths["bomb_exploded"])
-    print_summary("smokegrenade_expired", smoke_expires, saved_paths["smokegrenade_expired"])
-    print_summary("inferno_startburn", inferno_starts, saved_paths["inferno_startburn"])
-    print_summary("grenades", grenades, saved_paths["grenades"])
-    print_summary("sound_events", sound_events, saved_paths["sound_events"])
-    print_summary("ticks", ticks, saved_paths["ticks"])
-    print_summary("inferred_rounds", inferred_rounds, saved_paths["inferred_rounds"])
-    print(f"metadata: {metadata_json}")
+    player_count = int(ticks["name"].dropna().nunique()) if "name" in ticks.columns else 0
+    print_status("")
+    print_status("Parse Summary")
+    print_status(f"demo: {args.demo.name}")
+    print_status(f"map: {header.get('map_name', 'unknown')}")
+    print_status(f"rounds: {len(inferred_rounds)}")
+    print_status(f"players: {player_count}")
+    print_status(f"ticks: {len(ticks):,}")
+    print_status(f"tables: {len(saved_paths)} + metadata")
+    print_status(f"output: {output_dir}")
 
 
 def infer_round_boundaries(
@@ -1725,9 +1733,137 @@ def build_inferred_rounds_table(ticks, jump_by_tick, round_start_ticks: list[int
     ].rename(columns={"tick": "start_tick"})
     round_table = round_table.merge(boundary_info, on="start_tick", how="left")
     round_table["n_jump_players"] = round_table["n_jump_players"].fillna(0).astype(int)
+    movement_info = infer_live_start_ticks(ticks)
+    round_table = round_table.merge(movement_info, on="inferred_round_id", how="left")
     round_table["duration_ticks"] = round_table["end_tick"] - round_table["start_tick"]
     round_table["duration_seconds"] = round_table["duration_ticks"] / 64.0
     return round_table.sort_values("inferred_round_id").reset_index(drop=True)
+
+
+def infer_live_start_ticks(ticks: pd.DataFrame, movement_epsilon: float = 1e-3) -> pd.DataFrame:
+    if ticks.empty:
+        return pd.DataFrame(
+            columns=[
+                "inferred_round_id",
+                "freeze_start_tick",
+                "live_start_tick",
+                "freeze_end_tick",
+                "freeze_duration_ticks",
+                "freeze_duration_seconds",
+            ]
+        )
+    work = ticks.sort_values(["inferred_round_id", "name", "tick"]).copy()
+    work["dx_round"] = work.groupby(["inferred_round_id", "name"], sort=False)["X"].diff()
+    work["dy_round"] = work.groupby(["inferred_round_id", "name"], sort=False)["Y"].diff()
+    work["move_dist_round"] = np.sqrt((work["dx_round"] ** 2) + (work["dy_round"] ** 2))
+    work["is_moving_after_reset"] = work["move_dist_round"] > movement_epsilon
+    movement_by_tick = (
+        work.groupby(["inferred_round_id", "tick"], as_index=False)
+        .agg(n_moving_players=("is_moving_after_reset", "sum"))
+    )
+    initial_moving_ticks = (
+        work.loc[work["is_moving_after_reset"], ["inferred_round_id", "tick"]]
+        .groupby("inferred_round_id", as_index=False)
+        .agg(live_start_tick=("tick", "min"))
+    )
+    round_bounds = (
+        work.groupby("inferred_round_id", as_index=False)
+        .agg(
+            start_tick=("tick", "min"),
+            end_tick=("tick", "max"),
+        )
+    )
+    movement_info = round_bounds.merge(initial_moving_ticks, on="inferred_round_id", how="left")
+    movement_info["live_start_tick"] = movement_info["live_start_tick"].fillna(movement_info["start_tick"]).astype("int64")
+    movement_info["freeze_start_tick"] = movement_info["start_tick"]
+    for index, row in movement_info.iterrows():
+        if int(row["inferred_round_id"]) != 1:
+            continue
+        freeze_start_tick = _infer_round_one_freeze_start_tick(
+            movement_by_tick=movement_by_tick,
+            start_tick=int(row["start_tick"]),
+            end_tick=int(row["end_tick"]),
+        )
+        movement_info.at[index, "freeze_start_tick"] = int(freeze_start_tick)
+        movement_info.at[index, "live_start_tick"] = int(
+            _infer_first_moving_tick_after(
+                movement_by_tick=movement_by_tick,
+                inferred_round_id=1,
+                start_tick=int(freeze_start_tick),
+                default_tick=int(row["live_start_tick"]),
+            )
+        )
+    movement_info["freeze_start_tick"] = movement_info["freeze_start_tick"].astype("int64")
+    movement_info["freeze_end_tick"] = (movement_info["live_start_tick"] - 1).clip(lower=movement_info["freeze_start_tick"]).astype("int64")
+    movement_info["freeze_duration_ticks"] = (movement_info["live_start_tick"] - movement_info["freeze_start_tick"]).clip(lower=0).astype("int64")
+    movement_info["freeze_duration_seconds"] = movement_info["freeze_duration_ticks"] / 64.0
+    return movement_info[
+        [
+            "inferred_round_id",
+            "freeze_start_tick",
+            "live_start_tick",
+            "freeze_end_tick",
+            "freeze_duration_ticks",
+            "freeze_duration_seconds",
+        ]
+    ]
+
+
+def _infer_round_one_freeze_start_tick(
+    *,
+    movement_by_tick: pd.DataFrame,
+    start_tick: int,
+    end_tick: int,
+    min_static_ticks: int = 32,
+) -> int:
+    if end_tick <= start_tick:
+        return start_tick
+    window = movement_by_tick[
+        (movement_by_tick["inferred_round_id"] == 1)
+        & (movement_by_tick["tick"] >= start_tick)
+        & (movement_by_tick["tick"] <= end_tick)
+    ].sort_values("tick")
+    if window.empty:
+        return start_tick
+    quiet = window[window["n_moving_players"] == 0]["tick"].astype(int).tolist()
+    if not quiet:
+        return start_tick
+    best_start = start_tick
+    best_len = 0
+    run_start = quiet[0]
+    prev_tick = quiet[0]
+    for tick_value in quiet[1:]:
+        if tick_value == prev_tick + 1:
+            prev_tick = tick_value
+            continue
+        run_len = prev_tick - run_start + 1
+        if run_len >= min_static_ticks and run_len > best_len:
+            best_start = run_start
+            best_len = run_len
+        run_start = tick_value
+        prev_tick = tick_value
+    run_len = prev_tick - run_start + 1
+    if run_len >= min_static_ticks and run_len > best_len:
+        best_start = run_start
+        best_len = run_len
+    return int(best_start if best_len > 0 else start_tick)
+
+
+def _infer_first_moving_tick_after(
+    *,
+    movement_by_tick: pd.DataFrame,
+    inferred_round_id: int,
+    start_tick: int,
+    default_tick: int,
+) -> int:
+    moving = movement_by_tick[
+        (movement_by_tick["inferred_round_id"] == inferred_round_id)
+        & (movement_by_tick["tick"] > start_tick)
+        & (movement_by_tick["n_moving_players"] > 0)
+    ].sort_values("tick")
+    if moving.empty:
+        return int(default_tick)
+    return int(moving.iloc[0]["tick"])
 
 
 def build_metadata(
@@ -1905,11 +2041,5 @@ def build_metadata(
         },
         "players": sorted([name for name in ticks["name"].dropna().unique().tolist()]),
     }
-
-
-def print_summary(title: str, df, saved_path: Path) -> None:
-    print(f"{title}: {len(df)} rows, {len(df.columns)} cols -> {saved_path}")
-
-
 if __name__ == "__main__":
     main()

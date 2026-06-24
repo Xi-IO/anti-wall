@@ -9,7 +9,8 @@
 - 从 demo header 中提取地图等基础信息并落盘
 - 使用 Awpy 官方地图数据作为回合渲染背景
 - 提供本地 pygame GUI 播放器
-- 提供统一 CLI：`wall <demo或数据集目录>`、`wall catalog`、`wall assets`
+- 提供可见性导出：FOV + 地图几何 LOS
+- 提供统一 CLI：`wall <demo或数据集目录>`、`wall catalog`、`wall assets`、`wall visibility`
 
 ## 当前目录
 
@@ -128,6 +129,75 @@ wall outputs\match730_003825715054175584453_1941916173_129
 - `wall catalog <dataset_dir>`：为数据集构建 DuckDB catalog
 - `wall assets check ...`：检查 Awpy 地图资产
 - `wall assets init ...`：下载缺失的 Awpy 地图资产
+- `wall visibility <dataset_dir>`：导出可见性表
+
+## 可见性导出
+
+当前 `wall visibility` 已支持按推断回合导出玩家可见性判断。
+
+当前语义：
+
+- 先做敌我、存活和位置有效性过滤
+- 再做大约 `90°` 的 FOV 判断
+- 对 FOV 内目标调用 Awpy `VisibilityChecker` 做地图几何 LOS 判断
+- 输出 `pair` 或 `summary` 表
+
+当前默认行为：
+
+- 默认输出 `pair`
+- 默认 `tick-step = 8`
+- 默认格式优先 `parquet`
+- 多回合默认合并成一张总表
+- 默认跳过 freeze time
+- 默认 `jobs = 4`，但实际 worker 数不会超过回合数
+
+最常用命令：
+
+```powershell
+wall visibility outputs\match730_003825715054175584453_1941916173_129
+```
+
+默认会生成类似：
+
+- `visibility_all_rounds_step_8_post_freeze.parquet`
+
+如果要导出 `summary`：
+
+```powershell
+wall visibility outputs\match730_003825715054175584453_1941916173_129 --output-kind summary
+```
+
+如果要恢复“每回合一张表”：
+
+```powershell
+wall visibility outputs\match730_003825715054175584453_1941916173_129 --split-rounds
+```
+
+如果想看详细耗时：
+
+```powershell
+wall visibility outputs\match730_003825715054175584453_1941916173_129 --profile-visibility
+```
+
+当前 `pair` 输出保留字段：
+
+- `tick`
+- `round_id`
+- `observer`
+- `target`
+- `distance`
+- `relative_yaw_deg`
+- `in_fov`
+- `has_los`
+- `is_visible`
+
+当前 `summary` 输出按 `tick + observer` 聚合，包含：
+
+- `pair_count`
+- `fov_count`
+- `visible_count`
+- `fov_targets`
+- `visible_targets`
 
 ## 解析 demo
 

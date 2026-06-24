@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+import time
 from typing import Callable, Protocol
 
 import pygame
 
+from wall.profile import profile_log
 from wall.viewer.session import LoadedViewerData
 
 
@@ -82,8 +84,14 @@ class ViewerRoundRuntime:
         if frame_index in self.round_cache.cache:
             self.round_cache.cache.move_to_end(frame_index)
             return
+        render_started_at = time.perf_counter()
+        frame_tick = self.round_cache.frame_ticks[frame_index]
+        if frame_index == 0:
+            profile_log("viewer.first_render.start", round_id=self.round_cache.round_id, note=f"frame_tick={frame_tick}")
         rendered = self.round_cache.renderer.render_map_frame(self.round_cache.frame_ticks[frame_index])
         surface = rendered.convert() if hasattr(rendered, "convert") else rendered
         self.round_cache.cache[frame_index] = surface
+        if frame_index == 0:
+            profile_log("viewer.first_render.end", started_at=render_started_at, round_id=self.round_cache.round_id, note=f"frame_tick={frame_tick}")
         while len(self.round_cache.cache) > self.max_cached_frames:
             self.round_cache.cache.popitem(last=False)

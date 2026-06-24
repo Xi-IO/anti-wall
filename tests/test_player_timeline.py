@@ -8,6 +8,68 @@ from wall.domain.player import PlayerTimeline
 
 
 class PlayerTimelineTests(unittest.TestCase):
+    def test_frame_at_exposes_active_weapon_name(self) -> None:
+        frames = pd.DataFrame(
+            [
+                {
+                    "tick": 10,
+                    "name": "p1",
+                    "steamid": "s1",
+                    "active_weapon_name": "AK-47",
+                    "has_defuser": True,
+                    "X": 0.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "yaw": 0.0,
+                    "pitch": 0.0,
+                    "team_num": 2,
+                    "health": 100,
+                    "ducking": 0,
+                    "is_airborne": 0,
+                    "velocity_X": 0.0,
+                    "velocity_Y": 0.0,
+                    "velocity_Z": 0.0,
+                },
+            ]
+        )
+        timeline = PlayerTimeline("s1", frames)
+
+        frame = timeline.frame_at(10)
+
+        self.assertIsNotNone(frame)
+        self.assertEqual(frame.active_weapon_name, "AK-47")
+        self.assertTrue(frame.has_defuser)
+
+    def test_frame_at_defaults_missing_active_weapon_name_to_empty_string(self) -> None:
+        frames = pd.DataFrame(
+            [
+                {
+                    "tick": 10,
+                    "name": "p1",
+                    "steamid": "s1",
+                    "X": 0.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "yaw": 0.0,
+                    "pitch": 0.0,
+                    "team_num": 2,
+                    "health": 100,
+                    "ducking": 0,
+                    "is_airborne": 0,
+                    "velocity_X": 0.0,
+                    "velocity_Y": 0.0,
+                    "velocity_Z": 0.0,
+                },
+            ]
+        )
+        timeline = PlayerTimeline("s1", frames)
+
+        frame = timeline.frame_at(10)
+
+        self.assertIsNotNone(frame)
+        self.assertEqual(frame.active_weapon_name, "")
+        self.assertFalse(frame.has_defuser)
+
     def test_overlay_state_combines_damage_flash_and_blind_strength(self) -> None:
         frames = pd.DataFrame(
             [

@@ -3,7 +3,18 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from wall.output import progress_enabled
 from wall.viewer.shell import PygameRoundViewer
+
+
+def _render_progress_line(label: str, current: int, total: int, *, detail: str | None = None) -> str:
+    resolved_total = max(1, int(total))
+    resolved_current = max(0, min(int(current), resolved_total))
+    width = 20
+    filled = int(round((resolved_current / resolved_total) * width))
+    bar = "#" * filled + "-" * (width - filled)
+    suffix = f"  {detail}" if detail else ""
+    return f"{label:<10} [{bar}] {resolved_current}/{resolved_total}{suffix}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,6 +33,8 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if progress_enabled():
+        print(_render_progress_line("viewer", 1, 2, detail="Loading dataset"), flush=True)
     viewer = PygameRoundViewer(
         data_dir=args.data_dir,
         initial_round_id=args.round_id,
@@ -31,6 +44,8 @@ def main(argv: list[str] | None = None) -> None:
         frame_step=args.frame_step,
         tickrate=args.tickrate,
     )
+    if progress_enabled():
+        print(_render_progress_line("viewer", 2, 2, detail="Opening window"), flush=True)
     viewer.run()
 
 
