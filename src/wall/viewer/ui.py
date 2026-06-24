@@ -5,12 +5,21 @@ from dataclasses import dataclass
 import pygame
 
 from wall.viewer.layout import RoundDropdownOverlayLayout
+from wall.viewer.state import SidebarInfoPanelState
 
 
 @dataclass(frozen=True)
 class SidebarPlayerEntry:
+    player_id: str
+    display_name: str
+    display_number: str
+    team_num: int | None
+    sort_index: int
     label: str
+    match_keys: frozenset[str]
     color: tuple[int, int, int]
+    checkmark_color: tuple[int, int, int] = (255, 255, 255)
+    selected: bool = False
 
 
 @dataclass(frozen=True)
@@ -18,6 +27,16 @@ class SidebarRenderResult:
     button_rects: dict[str, pygame.Rect]
     round_item_rects: dict[int, pygame.Rect]
     speed_rects: dict[float, pygame.Rect]
+    player_rects: dict[str, pygame.Rect]
+
+
+@dataclass(frozen=True)
+class SidebarPlayerRowStyle:
+    background_color: tuple[int, int, int] | None
+    text_color: tuple[int, int, int]
+    swatch_fill_color: tuple[int, int, int]
+    swatch_border_color: tuple[int, int, int] | None
+    show_checkmark: bool
 
 
 def format_hud_number(number: int) -> str:
@@ -28,6 +47,67 @@ def tint_icon(base: pygame.Surface, color: tuple[int, int, int]) -> pygame.Surfa
     tinted = base.copy()
     tinted.fill((*color, 255), special_flags=pygame.BLEND_RGBA_MULT)
     return tinted
+
+
+def draw_selected_checkmark(
+    *,
+    screen: pygame.Surface,
+    box_rect: pygame.Rect,
+    color: tuple[int, int, int],
+) -> None:
+    supersample = 4
+    hi_size = (box_rect.width * supersample, box_rect.height * supersample)
+    hi_surface = pygame.Surface(hi_size, pygame.SRCALPHA)
+    points = [
+        (int(round(0.22 * hi_size[0])), int(round(0.52 * hi_size[1]))),
+        (int(round(0.42 * hi_size[0])), int(round(0.72 * hi_size[1]))),
+        (int(round(0.78 * hi_size[0])), int(round(0.28 * hi_size[1]))),
+    ]
+    pygame.draw.lines(hi_surface, (*color, 255), False, points, max(1, int(round(2.0 * supersample))))
+    smooth_surface = pygame.transform.smoothscale(hi_surface, box_rect.size)
+    screen.blit(smooth_surface, box_rect.topleft)
+
+
+def player_row_style(
+    *,
+    player_color: tuple[int, int, int],
+    text_color: tuple[int, int, int],
+    muted_text_color: tuple[int, int, int],
+    accent_color: tuple[int, int, int],
+    selected: bool,
+    hovered: bool,
+) -> SidebarPlayerRowStyle:
+    if selected and hovered:
+        return SidebarPlayerRowStyle(
+            background_color=(70, 76, 84),
+            text_color=(248, 248, 248),
+            swatch_fill_color=tuple(min(255, channel + 26) for channel in player_color),
+            swatch_border_color=(255, 255, 255),
+            show_checkmark=True,
+        )
+    if selected:
+        return SidebarPlayerRowStyle(
+            background_color=(58, 62, 68),
+            text_color=(240, 240, 240),
+            swatch_fill_color=tuple(min(255, channel + 18) for channel in player_color),
+            swatch_border_color=(232, 236, 240),
+            show_checkmark=True,
+        )
+    if hovered:
+        return SidebarPlayerRowStyle(
+            background_color=(52, 52, 52),
+            text_color=text_color,
+            swatch_fill_color=player_color,
+            swatch_border_color=None,
+            show_checkmark=False,
+        )
+    return SidebarPlayerRowStyle(
+        background_color=None,
+        text_color=muted_text_color,
+        swatch_fill_color=player_color,
+        swatch_border_color=None,
+        show_checkmark=False,
+    )
 
 
 def draw_media_icon(
@@ -150,21 +230,20 @@ def draw_sidebar(
     playback_playing: bool,
     show_sound_effects: bool,
     sound_toggle_icons: dict[str, pygame.Surface],
-    cached_frame_count: int,
-    relative_tick: int,
-    relative_seconds: float,
-    current_frame_number: int,
-    total_frames: int,
     speed_options: list[float],
     speed_index: int,
     speed_label_formatter,
     player_entries: list[SidebarPlayerEntry],
+    info_title_text: str,
+    info_lines: list[str],
+    info_panel_state: SidebarInfoPanelState,
 ) -> SidebarRenderResult:
     sidebar_rect = pygame.Rect(content_origin_x + map_width, content_origin_y, sidebar_width, map_height + bottom_bar_height)
     pygame.draw.rect(screen, sidebar_color, sidebar_rect)
     button_rects: dict[str, pygame.Rect] = {}
     round_item_rects: dict[int, pygame.Rect] = {}
     speed_rects: dict[float, pygame.Rect] = {}
+    player_rects: dict[str, pygame.Rect] = {}
     x = content_origin_x + map_width + 16
     y = content_origin_y + 16
 
@@ -215,18 +294,6 @@ def draw_sidebar(
     draw_media_icon(screen, sound_rect, "sound_on" if show_sound_effects else "sound_off", icon_color, sound_toggle_icons)
     y += 48
 
-    progress_text = small_font.render(f"Cached {cached_frame_count} frames", True, muted_text_color)
-    screen.blit(progress_text, (x, y))
-    y += 28
-
-    tick_text = small_font.render(
-        f"Round tick {relative_tick} | {relative_seconds:.2f}s | frame {current_frame_number}/{total_frames}",
-        True,
-        muted_text_color,
-    )
-    screen.blit(tick_text, (x, y))
-    y += 36
-
     speed_title = font.render("Speed", True, text_color)
     screen.blit(speed_title, (x, y))
     y += 34
@@ -239,14 +306,99 @@ def draw_sidebar(
     if speed_rects:
         y = max(rect.bottom for rect in speed_rects.values()) + 24
 
-    legend_title = font.render("Players", True, text_color)
-    screen.blit(legend_title, (x, y))
+    players_title = font.render("Players", True, text_color)
+    screen.blit(players_title, (x, y))
     y += 30
+    mouse_pos = pygame.mouse.get_pos()
     for player in player_entries:
-        pygame.draw.rect(screen, player.color, (x, y + 4, 12, 12))
-        label = small_font.render(player.label, True, text_color)
+        row_rect = pygame.Rect(x - 4, y - 2, sidebar_width - 24, 20)
+        player_rects[player.player_id] = row_rect
+        row_style = player_row_style(
+            player_color=player.color,
+            text_color=text_color,
+            muted_text_color=muted_text_color,
+            accent_color=accent_color,
+            selected=player.selected,
+            hovered=row_rect.collidepoint(mouse_pos),
+        )
+        if row_style.background_color is not None:
+            pygame.draw.rect(screen, row_style.background_color, row_rect, border_radius=4)
+        swatch_rect = pygame.Rect(x, y + 4, 12, 12)
+        pygame.draw.rect(screen, row_style.swatch_fill_color, swatch_rect)
+        if row_style.swatch_border_color is not None:
+            pygame.draw.rect(screen, row_style.swatch_border_color, swatch_rect.inflate(2, 2), 1)
+        if row_style.show_checkmark:
+            draw_selected_checkmark(
+                screen=screen,
+                box_rect=swatch_rect,
+                color=player.checkmark_color,
+            )
+        label = small_font.render(player.label, True, row_style.text_color)
         screen.blit(label, (x + 20, y))
         y += 22
+    y += 8
+
+    info_title = font.render(info_title_text, True, text_color)
+    screen.blit(info_title, (x, y))
+    y += 30
+
+    panel_rect = pygame.Rect(x, y, sidebar_width - 32, max(96, sidebar_rect.bottom - 16 - y))
+    pygame.draw.rect(screen, button_color, panel_rect, border_radius=6)
+    pygame.draw.rect(screen, (66, 66, 66), panel_rect, 1, border_radius=6)
+    button_rects["info_panel"] = panel_rect
+
+    line_height = 18
+    content_padding = 10
+    info_panel_state.viewport_rect = pygame.Rect(
+        panel_rect.x + content_padding,
+        panel_rect.y + content_padding,
+        panel_rect.width - content_padding * 2,
+        panel_rect.height - content_padding * 2,
+    )
+    info_panel_state.track_rect = pygame.Rect(0, 0, 0, 0)
+    info_panel_state.thumb_rect = pygame.Rect(0, 0, 0, 0)
+    visible_count = max(1, info_panel_state.viewport_rect.height // line_height)
+    scroll_enabled = len(info_lines) > visible_count
+    if scroll_enabled:
+        scrollbar_width = 14
+        info_panel_state.viewport_rect.width -= scrollbar_width + 8
+        info_panel_state.track_rect = pygame.Rect(
+            info_panel_state.viewport_rect.right + 8,
+            info_panel_state.viewport_rect.y,
+            scrollbar_width,
+            info_panel_state.viewport_rect.height,
+        )
+        info_panel_state.clamp_start(len(info_lines), visible_count)
+        if info_panel_state.stick_to_latest:
+            info_panel_state.snap_to_latest(len(info_lines), visible_count)
+        thumb_height = max(28, int(round(info_panel_state.track_rect.height * visible_count / len(info_lines))))
+        max_start = max(1, len(info_lines) - visible_count)
+        thumb_travel = max(0, info_panel_state.track_rect.height - thumb_height)
+        thumb_offset = int(round(thumb_travel * (info_panel_state.start_index / max_start)))
+        info_panel_state.thumb_rect = pygame.Rect(
+            info_panel_state.track_rect.x + 2,
+            info_panel_state.track_rect.y + thumb_offset,
+            info_panel_state.track_rect.width - 4,
+            thumb_height,
+        )
+        pygame.draw.rect(screen, (58, 58, 58), info_panel_state.track_rect, border_radius=5)
+        pygame.draw.rect(screen, accent_color, info_panel_state.thumb_rect, border_radius=5)
+    else:
+        info_panel_state.clamp_start(len(info_lines), visible_count)
+        info_panel_state.snap_to_latest(len(info_lines), visible_count)
+
+    button_rects["info_panel_viewport"] = info_panel_state.viewport_rect
+    button_rects["info_scroll_track"] = info_panel_state.track_rect
+    button_rects["info_scroll_thumb"] = info_panel_state.thumb_rect
+
+    previous_clip = screen.get_clip()
+    screen.set_clip(info_panel_state.viewport_rect)
+    text_y = info_panel_state.viewport_rect.y
+    for line in info_panel_state.visible_lines(info_lines, visible_count):
+        label = small_font.render(line, True, muted_text_color if line.startswith("  ") else text_color)
+        screen.blit(label, (info_panel_state.viewport_rect.x, text_y))
+        text_y += line_height
+    screen.set_clip(previous_clip)
 
     if dropdown_overlay is not None:
         draw_round_dropdown_overlay(
@@ -262,6 +414,7 @@ def draw_sidebar(
         button_rects=button_rects,
         round_item_rects=round_item_rects,
         speed_rects=speed_rects,
+        player_rects=player_rects,
     )
 
 

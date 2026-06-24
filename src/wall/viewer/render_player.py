@@ -6,6 +6,7 @@ import pygame
 
 from wall.render.round_pygame_effects import draw_blind_glow, mix_with_white
 from wall.viewer.geometry import offset_point
+from wall.viewer.player_palette import player_marker_number_color
 from wall.viewer.ui import format_hud_number
 
 
@@ -208,7 +209,7 @@ def draw_player(
     draw_player_health_arc(surface=surface, center=center, health=health, blind_strength=blind_strength)
     pygame.draw.circle(surface, color, center, 8)
     pygame.draw.circle(surface, (0, 0, 0), center, 8, 1)
-    number_color = (24, 22, 2) if team_num == 2 else (255, 255, 255)
+    number_color = player_marker_number_color(team_num)
     number_color = mix_with_white(number_color, blind_strength * 0.45)
     number_surface = player_number_font.render(format_hud_number(player_number), True, number_color)
     rect = number_surface.get_rect(center=(center[0], center[1] - 1))

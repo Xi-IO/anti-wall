@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from wall.visibility.dataset import MatchDataset
+from wall.viewer.info_events import InfoEvent, VISIBILITY_EVENT_KIND
 from wall.viewer.shell import PygameRoundViewer
 from wall.viewer.loading import ViewerLoadState
 
@@ -95,6 +96,23 @@ class FakeRuntime:
                         "show_sound_effects": show_sound_effects,
                         "player_numbers": {"player": 1},
                         "players": ["player"],
+                        "round_players": type(
+                            "RoundPlayers",
+                            (),
+                            {
+                                "ordered_steamids": ["player"],
+                                "get_by_steamid": lambda self, steamid: type(
+                                    "Timeline",
+                                    (),
+                                    {
+                                        "display_name": "player",
+                                        "team_at": lambda self, tick: 2,
+                                    },
+                                )()
+                                if steamid == "player"
+                                else None,
+                            },
+                        )(),
                     },
                 )(),
             },
@@ -176,7 +194,13 @@ class ViewerShellTests(unittest.TestCase):
             ]
         )
         viewer.load_state = viewer.dataset_loader.state
-        with patch("wall.viewer.shell.ViewerRoundRuntime", FakeRuntime):
+        fake_events = [
+            InfoEvent(4, 100, 0.0, VISIBILITY_EVENT_KIND, "A", "X", "0.00s  A spotted X"),
+        ]
+        with (
+            patch("wall.viewer.shell.ViewerRoundRuntime", FakeRuntime),
+            patch("wall.viewer.shell.load_info_events_for_dataset", return_value=fake_events) as load_info_events,
+        ):
             viewer._advance_startup()
             self.assertEqual(viewer.load_state.status, "loading")
             self.assertIsNone(viewer.loaded_data)
@@ -184,8 +208,10 @@ class ViewerShellTests(unittest.TestCase):
 
             viewer._advance_startup()
             self.assertIs(viewer.loaded_data, fake_loaded)
+            self.assertEqual(viewer.visibility_events, fake_events)
             self.assertIsNotNone(viewer.runtime)
             self.assertEqual(viewer.startup_stage, "select_round")
+            load_info_events.assert_called_once_with(fake_loaded, tickrate=64.0)
 
             runtime = viewer.runtime
             assert runtime is not None
@@ -230,6 +256,338 @@ class ViewerShellTests(unittest.TestCase):
         self.assertEqual(viewer.startup_stage, "failed")
         self.assertEqual(viewer.load_state.status, "failed")
         self.assertIn("RuntimeError", viewer.loading_message)
+
+    def test_mousewheel_scrolls_info_panel_only_when_hovered(self) -> None:
+        viewer = self._build_viewer()
+        viewer.button_rects = {
+            "info_panel_viewport": type("Rect", (), {"collidepoint": lambda self, pos: pos == (10, 10)})(),
+            "info_scroll_track": type("Rect", (), {"width": 0, "collidepoint": lambda self, pos: False})(),
+            "info_scroll_thumb": type("Rect", (), {"width": 0, "collidepoint": lambda self, pos: False})(),
+        }
+        calls: list[int] = []
+
+        with patch.object(viewer, "_scroll_info_panel", side_effect=lambda delta: calls.append(delta)):
+            viewer._handle_mousewheel(1, (10, 10))
+            viewer._handle_mousewheel(1, (50, 50))
+
+        self.assertEqual(calls, [1])
+
+    def test_sidebar_event_lines_show_placeholder_when_no_visibility_artifact(self) -> None:
+        viewer = self._build_viewer()
+        viewer.visibility_events = []
+        runtime = FakeRuntime(
+            loaded_data=FakeLoadedData(),
+            initial_round_id=4,
+            frame_step=1,
+            tickrate=64.0,
+            max_cached_frames=240,
+            renderer_factory=lambda round_id: round_id,
+        )
+        runtime.select_round(4, show_sound_effects=True)
+        viewer.runtime = runtime
+        viewer.playback.reset(viewer.round_cache.frame_ticks)
+
+        lines = viewer._sidebar_event_lines(100)
+
+        self.assertEqual(lines, ["No visibility events"])
+
+    def test_sidebar_event_lines_show_all_when_no_players_selected(self) -> None:
+        viewer = self._build_viewer()
+        viewer.visibility_events = [
+            InfoEvent(4, 100, 0.0, VISIBILITY_EVENT_KIND, "A", "X", "0.00s  A spotted X"),
+            InfoEvent(4, 120, 2.0, VISIBILITY_EVENT_KIND, "B", "A", "2.00s  B spotted A"),
+            InfoEvent(4, 140, 4.0, VISIBILITY_EVENT_KIND, "C", "Z", "4.00s  C spotted Z"),
+        ]
+        runtime = FakeRuntime(
+            loaded_data=FakeLoadedData(),
+            initial_round_id=4,
+            frame_step=1,
+            tickrate=64.0,
+            max_cached_frames=240,
+            renderer_factory=lambda round_id: round_id,
+        )
+        runtime.select_round(4, show_sound_effects=True)
+        viewer.runtime = runtime
+        viewer.playback.reset(viewer.round_cache.frame_ticks)
+
+        lines = viewer._sidebar_event_lines(130)
+
+        self.assertEqual(lines, ["0.00s  A spotted X", "2.00s  B spotted A"])
+
+    def test_sidebar_event_lines_filter_by_selected_observer_or_target(self) -> None:
+        viewer = self._build_viewer()
+        viewer.visibility_events = [
+            InfoEvent(4, 100, 0.0, VISIBILITY_EVENT_KIND, "AIKUUUUUU", "X", "0.00s  AIKUUUUUU spotted X", observer_key="sA", target_key="sX"),
+            InfoEvent(4, 120, 2.0, VISIBILITY_EVENT_KIND, "Y", "AIKUUUUUU", "2.00s  Y spotted AIKUUUUUU", observer_key="sY", target_key="sA"),
+            InfoEvent(4, 130, 3.0, VISIBILITY_EVENT_KIND, "B", "Z", "3.00s  B spotted Z", observer_key="sB", target_key="sZ"),
+        ]
+        viewer.selected_players = {"sA"}
+        runtime = FakeRuntime(
+            loaded_data=FakeLoadedData(),
+            initial_round_id=4,
+            frame_step=1,
+            tickrate=64.0,
+            max_cached_frames=240,
+            renderer_factory=lambda round_id: round_id,
+        )
+        runtime.select_round(4, show_sound_effects=True)
+        viewer.runtime = runtime
+        viewer.playback.reset(viewer.round_cache.frame_ticks)
+
+        lines = viewer._sidebar_event_lines(140)
+
+        self.assertEqual(lines, ["0.00s  AIKUUUUUU spotted X", "2.00s  Y spotted AIKUUUUUU"])
+
+    def test_sidebar_event_lines_filter_by_selected_steamid_when_event_keys_fallback_to_names(self) -> None:
+        viewer = self._build_viewer()
+        viewer.visibility_events = [
+            InfoEvent(
+                4,
+                100,
+                0.0,
+                VISIBILITY_EVENT_KIND,
+                "RealDevice",
+                "Potato pope",
+                "0.00s  RealDevice spotted Potato pope",
+                observer_key="RealDevice",
+                target_key="Potato pope",
+            ),
+            InfoEvent(
+                4,
+                120,
+                2.0,
+                VISIBILITY_EVENT_KIND,
+                "Potato Khan Jr",
+                "RealDevice",
+                "2.00s  Potato Khan Jr spotted RealDevice",
+                observer_key="Potato Khan Jr",
+                target_key="RealDevice",
+            ),
+            InfoEvent(
+                4,
+                130,
+                3.0,
+                VISIBILITY_EVENT_KIND,
+                "Other",
+                "Else",
+                "3.00s  Other spotted Else",
+                observer_key="Other",
+                target_key="Else",
+            ),
+        ]
+        runtime = FakeRuntime(
+            loaded_data=FakeLoadedData(),
+            initial_round_id=4,
+            frame_step=1,
+            tickrate=64.0,
+            max_cached_frames=240,
+            renderer_factory=lambda round_id: round_id,
+        )
+        runtime.select_round(4, show_sound_effects=True)
+        viewer.runtime = runtime
+        viewer.playback.reset(viewer.round_cache.frame_ticks)
+        viewer._sidebar_player_keys = lambda: ["76561198000000008"]  # type: ignore[method-assign]
+        viewer._player_display_name = lambda key: "RealDevice"  # type: ignore[method-assign]
+        viewer._team_num_at_tick = lambda key, tick: 3  # type: ignore[method-assign]
+        viewer.selected_players = {"76561198000000008"}
+
+        lines = viewer._sidebar_event_lines(140)
+
+        self.assertEqual(
+            lines,
+            ["0.00s  RealDevice spotted Potato pope", "2.00s  Potato Khan Jr spotted RealDevice"],
+        )
+
+    def test_sidebar_event_lines_filter_by_selected_steamid_when_event_keys_are_steamids(self) -> None:
+        viewer = self._build_viewer()
+        viewer.visibility_events = [
+            InfoEvent(
+                4,
+                100,
+                0.0,
+                VISIBILITY_EVENT_KIND,
+                "RealDevice",
+                "Potato pope",
+                "0.00s  RealDevice spotted Potato pope",
+                observer_key="76561198000000008",
+                target_key="76561198000000004",
+            ),
+            InfoEvent(
+                4,
+                120,
+                2.0,
+                VISIBILITY_EVENT_KIND,
+                "Potato Khan Jr",
+                "RealDevice",
+                "2.00s  Potato Khan Jr spotted RealDevice",
+                observer_key="76561198000000003",
+                target_key="76561198000000008",
+            ),
+        ]
+        runtime = FakeRuntime(
+            loaded_data=FakeLoadedData(),
+            initial_round_id=4,
+            frame_step=1,
+            tickrate=64.0,
+            max_cached_frames=240,
+            renderer_factory=lambda round_id: round_id,
+        )
+        runtime.select_round(4, show_sound_effects=True)
+        viewer.runtime = runtime
+        viewer.playback.reset(viewer.round_cache.frame_ticks)
+        viewer._sidebar_player_keys = lambda: ["76561198000000008"]  # type: ignore[method-assign]
+        viewer._player_display_name = lambda key: "RealDevice"  # type: ignore[method-assign]
+        viewer._team_num_at_tick = lambda key, tick: 3  # type: ignore[method-assign]
+        viewer.selected_players = {"76561198000000008"}
+
+        lines = viewer._sidebar_event_lines(140)
+
+        self.assertEqual(
+            lines,
+            ["0.00s  RealDevice spotted Potato pope", "2.00s  Potato Khan Jr spotted RealDevice"],
+        )
+
+    def test_player_click_toggles_selection_without_reloading_visibility(self) -> None:
+        viewer = self._build_viewer()
+        viewer.player_rects = {"player": type("Rect", (), {"collidepoint": lambda self, pos: pos == (10, 10)})()}
+        viewer.button_rects = {}
+        viewer.round_item_rects = {}
+        viewer.speed_rects = {}
+
+        with patch("wall.viewer.shell.load_info_events_for_dataset") as load_info_events:
+            viewer._handle_mouse_down((10, 10))
+            self.assertEqual(viewer.selected_players, {"player"})
+            viewer._handle_mouse_down((10, 10))
+            self.assertEqual(viewer.selected_players, set())
+
+        load_info_events.assert_not_called()
+
+    def test_visibility_feed_title_reflects_selection(self) -> None:
+        viewer = self._build_viewer()
+        self.assertEqual(viewer._visibility_feed_title(), "Visibility Feed")
+
+        runtime = FakeRuntime(
+            loaded_data=FakeLoadedData(),
+            initial_round_id=4,
+            frame_step=1,
+            tickrate=64.0,
+            max_cached_frames=240,
+            renderer_factory=lambda round_id: round_id,
+        )
+        runtime.select_round(4, show_sound_effects=True)
+        viewer.runtime = runtime
+
+        viewer.selected_players = {"player"}
+        self.assertEqual(viewer._visibility_feed_title(), "Visibility Feed · player")
+
+        viewer.selected_players = {"AIKUUUUUU", "Eggo"}
+        self.assertEqual(viewer._visibility_feed_title(), "Visibility Feed · 2 players")
+
+    def test_visibility_feed_empty_text_reflects_selection(self) -> None:
+        viewer = self._build_viewer()
+        self.assertEqual(viewer._visibility_feed_empty_text(), "No visibility events")
+
+        runtime = FakeRuntime(
+            loaded_data=FakeLoadedData(),
+            initial_round_id=4,
+            frame_step=1,
+            tickrate=64.0,
+            max_cached_frames=240,
+            renderer_factory=lambda round_id: round_id,
+        )
+        runtime.select_round(4, show_sound_effects=True)
+        viewer.runtime = runtime
+
+        viewer.selected_players = {"player"}
+        self.assertEqual(viewer._visibility_feed_empty_text(), "No visibility events for player")
+
+        viewer.selected_players = {"AIKUUUUUU", "Eggo"}
+        self.assertEqual(viewer._visibility_feed_empty_text(), "No visibility events for selected players")
+
+    def test_sidebar_event_lines_use_contextual_empty_state_for_selected_player(self) -> None:
+        viewer = self._build_viewer()
+        viewer.visibility_events = [
+            InfoEvent(4, 100, 0.0, VISIBILITY_EVENT_KIND, "B", "Z", "0.00s  B spotted Z", observer_key="sB", target_key="sZ"),
+        ]
+        runtime = FakeRuntime(
+            loaded_data=FakeLoadedData(),
+            initial_round_id=4,
+            frame_step=1,
+            tickrate=64.0,
+            max_cached_frames=240,
+            renderer_factory=lambda round_id: round_id,
+        )
+        runtime.select_round(4, show_sound_effects=True)
+        viewer.runtime = runtime
+        viewer.selected_players = {"player"}
+        viewer.playback.reset(viewer.round_cache.frame_ticks)
+
+        lines = viewer._sidebar_event_lines(120)
+
+        self.assertEqual(lines, ["No visibility events for player"])
+
+    def test_sidebar_player_entries_sort_by_display_number_not_steamid(self) -> None:
+        viewer = self._build_viewer()
+        viewer.runtime = type(
+            "Runtime",
+            (),
+            {
+                "round_cache": type(
+                    "RoundCache",
+                    (),
+                    {
+                        "frame_ticks": [100],
+                        "renderer": type(
+                            "Renderer",
+                            (),
+                            {
+                                "player_numbers": {"T1": 1, "T2": 2, "CT6": 6, "CT7": 7},
+                            },
+                        )(),
+                    },
+                )(),
+            },
+        )()
+        viewer._sidebar_player_keys = lambda: ["steam_ct7", "steam_t1", "steam_ct6", "steam_t2"]  # type: ignore[method-assign]
+        viewer._player_display_name = lambda key: {  # type: ignore[method-assign]
+            "steam_ct7": "CT7",
+            "steam_t1": "T1",
+            "steam_ct6": "CT6",
+            "steam_t2": "T2",
+        }[key]
+        viewer._team_num_at_tick = lambda key, tick: 3 if "ct" in key else 2  # type: ignore[method-assign]
+
+        entries = viewer._sidebar_player_entries(100)
+
+        self.assertEqual([entry.player_id for entry in entries], ["steam_t1", "steam_t2", "steam_ct6", "steam_ct7"])
+        self.assertEqual([entry.label for entry in entries], ["1. T1", "2. T2", "6. CT6", "7. CT7"])
+
+    def test_sidebar_player_entries_keep_steamid_as_player_id(self) -> None:
+        viewer = self._build_viewer()
+        viewer.runtime = type(
+            "Runtime",
+            (),
+            {
+                "round_cache": type(
+                    "RoundCache",
+                    (),
+                    {
+                        "frame_ticks": [100],
+                        "renderer": type("Renderer", (), {"player_numbers": {"player": 1}})(),
+                    },
+                )(),
+            },
+        )()
+        viewer._sidebar_player_keys = lambda: ["76561198000000001"]  # type: ignore[method-assign]
+        viewer._player_display_name = lambda key: "player"  # type: ignore[method-assign]
+        viewer._team_num_at_tick = lambda key, tick: 2  # type: ignore[method-assign]
+
+        entries = viewer._sidebar_player_entries(100)
+
+        self.assertEqual(entries[0].player_id, "76561198000000001")
+        self.assertEqual(entries[0].display_name, "player")
+        self.assertEqual(entries[0].label, "1. player")
+        self.assertEqual(entries[0].match_keys, frozenset({"76561198000000001", "player"}))
 
 
 if __name__ == "__main__":

@@ -29,11 +29,13 @@ from wall.viewer.config import (
     SPEED_OPTIONS,
     TEXT_COLOR,
 )
+from wall.viewer.info_events import filter_events_by_players, load_info_events_for_dataset, visible_event_lines_for_tick
 from wall.viewer.layout import build_round_dropdown_overlay
 from wall.viewer.loading import ViewerDatasetLoader, ViewerLoadState
+from wall.viewer.player_palette import player_marker_number_color
 from wall.viewer.renderer import PygameRoundRenderer
 from wall.viewer.runtime import ViewerRoundRuntime
-from wall.viewer.state import PlaybackState, RoundDropdownState
+from wall.viewer.state import PlaybackState, RoundDropdownState, SidebarInfoPanelState
 from wall.viewer.ui import SidebarPlayerEntry, draw_bottom_bar, draw_sidebar, format_hud_number
 
 
@@ -62,6 +64,7 @@ class PygameRoundViewer:
         self.loaded_data: DatasetIndex | None = None
         self.runtime: ViewerRoundRuntime | None = None
         self.player_numbers: dict[str, int] = {}
+        self.visibility_events = []
         self.map_width = map_width
         self.map_height = map_height
         self.screen = pygame.display.set_mode(
@@ -80,7 +83,10 @@ class PygameRoundViewer:
         self.button_rects: dict[str, pygame.Rect] = {}
         self.round_item_rects: dict[int, pygame.Rect] = {}
         self.speed_rects: dict[float, pygame.Rect] = {}
+        self.player_rects: dict[str, pygame.Rect] = {}
+        self.selected_players: set[str] = set()
         self.round_dropdown = RoundDropdownState()
+        self.info_panel = SidebarInfoPanelState()
         self.dataset_loader = ViewerDatasetLoader(self.data_dir)
         self.load_state: ViewerLoadState[DatasetIndex] = self.dataset_loader.state
         self.startup_stage: Literal["waiting_for_dataset", "select_round", "cache_first_frame", "ready", "failed"] = "waiting_for_dataset"
@@ -196,6 +202,8 @@ class PygameRoundViewer:
         self.round_dropdown.align_to_selected(selected_index, len(self.round_ids))
         self.runtime.select_round(round_id, show_sound_effects=self.show_sound_effects)
         self.playback.reset(self.round_cache.frame_ticks)
+        self.info_panel.start_index = 0
+        self.info_panel.stick_to_latest = True
         if cache_first_frame:
             profile_log("viewer.first_frame_cache.start", round_id=round_id, map_name=None if self.loaded_data is None else self.loaded_data.map_name)
             self.runtime.ensure_cached(0)
@@ -209,6 +217,10 @@ class PygameRoundViewer:
 
     def _install_loaded_dataset(self, loaded_data: DatasetIndex) -> None:
         self.loaded_data = loaded_data
+        self.visibility_events = load_info_events_for_dataset(
+            self.loaded_data,
+            tickrate=self.tickrate,
+        )
         self.runtime = ViewerRoundRuntime(
             loaded_data=self.loaded_data,
             initial_round_id=self.initial_round_id,
@@ -284,11 +296,14 @@ class PygameRoundViewer:
                     elif event.type == pygame.MOUSEBUTTONUP:
                         self.playback.dragging_timeline = False
                         self.round_dropdown.dragging_scroll = False
+                        self.info_panel.dragging_scroll = False
                     elif event.type == pygame.MOUSEMOTION:
                         if self.playback.dragging_timeline:
                             self._update_timeline_from_mouse(event.pos)
                         elif self.round_dropdown.dragging_scroll:
                             self._update_round_scroll_from_mouse(event.pos)
+                        elif self.info_panel.dragging_scroll:
+                            self._update_info_panel_scroll_from_mouse(event.pos)
                     elif event.type == pygame.VIDEORESIZE:
                         self._apply_window_size(event.w, event.h)
                     elif hasattr(pygame, "WINDOWSIZECHANGED") and event.type == pygame.WINDOWSIZECHANGED:
@@ -350,6 +365,17 @@ class PygameRoundViewer:
         if self.round_dropdown.track_rect.collidepoint(position):
             self._jump_round_scroll_to_mouse(position)
             return
+        if self.info_panel.thumb_rect.collidepoint(position):
+            self.info_panel.dragging_scroll = True
+            self._update_info_panel_scroll_from_mouse(position)
+            return
+        if self.info_panel.track_rect.collidepoint(position):
+            self._jump_info_panel_scroll_to_mouse(position)
+            return
+        for player, rect in self.player_rects.items():
+            if rect.collidepoint(position):
+                self._toggle_player_selection(player)
+                return
         for round_id, rect in self.round_item_rects.items():
             if rect.collidepoint(position):
                 self.select_round(round_id)
@@ -377,18 +403,12 @@ class PygameRoundViewer:
         self.round_dropdown.close()
 
     def _handle_mousewheel(self, delta: int, position: tuple[int, int] | None = None) -> None:
-        if not self.round_dropdown.is_open or len(self.round_ids) <= self.round_dropdown.visible_count:
-            return
-        if position is not None:
-            hit_dropdown = (
-                self.round_dropdown.area_rect.collidepoint(position)
-                or self.round_dropdown.track_rect.collidepoint(position)
-                or self.round_dropdown.thumb_rect.collidepoint(position)
-                or (self.button_rects.get("round_dropdown") and self.button_rects["round_dropdown"].collidepoint(position))
-            )
-            if not hit_dropdown:
+        if self.round_dropdown.is_open and len(self.round_ids) > self.round_dropdown.visible_count:
+            if position is None or self._position_hits_round_dropdown(position):
+                self._scroll_round_dropdown(delta)
                 return
-        self._scroll_round_dropdown(delta)
+        if position is not None and self._position_hits_info_panel(position):
+            self._scroll_info_panel(delta)
 
     def _scroll_round_dropdown(self, delta: int) -> None:
         self.round_dropdown.scroll(delta, len(self.round_ids))
@@ -398,6 +418,21 @@ class PygameRoundViewer:
 
     def _update_round_scroll_from_mouse(self, position: tuple[int, int]) -> None:
         self.round_dropdown.update_from_mouse(position[1], len(self.round_ids))
+
+    def _scroll_info_panel(self, delta: int) -> None:
+        total_count = len(self._sidebar_event_lines(self._current_frame_tick()))
+        visible_count = self._info_panel_visible_count()
+        self.info_panel.scroll(delta, total_count, visible_count)
+
+    def _jump_info_panel_scroll_to_mouse(self, position: tuple[int, int]) -> None:
+        total_count = len(self._sidebar_event_lines(self._current_frame_tick()))
+        visible_count = self._info_panel_visible_count()
+        self.info_panel.jump_to_mouse(position[1], total_count, visible_count)
+
+    def _update_info_panel_scroll_from_mouse(self, position: tuple[int, int]) -> None:
+        total_count = len(self._sidebar_event_lines(self._current_frame_tick()))
+        visible_count = self._info_panel_visible_count()
+        self.info_panel.update_from_mouse(position[1], total_count, visible_count)
 
     def _update_timeline_from_mouse(self, position: tuple[int, int]) -> None:
         if self.round_cache is None:
@@ -423,11 +458,20 @@ class PygameRoundViewer:
     def _change_speed(self, delta: int) -> None:
         self.speed_index = max(0, min(self.speed_index + delta, len(SPEED_OPTIONS) - 1))
 
+    def _toggle_player_selection(self, player: str) -> None:
+        if player in self.selected_players:
+            self.selected_players.remove(player)
+        else:
+            self.selected_players.add(player)
+        self.info_panel.stick_to_latest = True
+
     def _change_round(self, delta: int) -> None:
         if self.runtime.change_round(delta, show_sound_effects=self.show_sound_effects):
             self.round_dropdown.close()
             self.round_dropdown.align_to_selected(self.round_ids.index(self.selected_round_id), len(self.round_ids))
             self.playback.reset(self.round_cache.frame_ticks)
+            self.info_panel.start_index = 0
+            self.info_panel.stick_to_latest = True
             self.runtime.ensure_cached(0)
 
     def _load_viewer_sound_toggle_icons(self) -> dict[str, pygame.Surface]:
@@ -482,7 +526,9 @@ class PygameRoundViewer:
         self.button_rects = {key: value for key, value in self.button_rects.items() if key == "timeline"}
         self.round_item_rects = {}
         self.speed_rects = {}
+        self.player_rects = {}
         self.round_dropdown.reset_layout()
+        self.info_panel.reset_layout()
         dropdown_overlay = build_round_dropdown_overlay(
             origin_x=content_origin_x + self.map_width + 16,
             origin_y=content_origin_y + 110,
@@ -494,15 +540,8 @@ class PygameRoundViewer:
         if self.round_cache is None:
             return
         current_tick = self.round_cache.frame_ticks[self.playback.current_frame_index]
-        relative_tick = current_tick - self.round_cache.renderer.round_start_tick
-        relative_seconds = relative_tick / self.tickrate if self.tickrate > 0 else 0.0
-        player_entries = [
-            SidebarPlayerEntry(
-                label=self._sidebar_player_label(player, current_tick),
-                color=team_color(self._team_num_at_tick(player, current_tick)),
-            )
-            for player in self.round_cache.renderer.players
-        ]
+        player_entries = self._sidebar_player_entries(current_tick)
+        info_lines = self._sidebar_event_lines(current_tick)
         sidebar = draw_sidebar(
             screen=self.screen,
             content_origin_x=content_origin_x,
@@ -526,31 +565,161 @@ class PygameRoundViewer:
             playback_playing=self.playback.playing,
             show_sound_effects=self.show_sound_effects,
             sound_toggle_icons=self.sound_toggle_icons,
-            cached_frame_count=len(self.round_cache.cache),
-            relative_tick=relative_tick,
-            relative_seconds=relative_seconds,
-            current_frame_number=self.playback.current_frame_index + 1,
-            total_frames=len(self.round_cache.frame_ticks),
             speed_options=SPEED_OPTIONS,
             speed_index=self.speed_index,
             speed_label_formatter=self._format_speed_label,
             player_entries=player_entries,
+            info_title_text=self._visibility_feed_title(),
+            info_lines=info_lines,
+            info_panel_state=self.info_panel,
         )
         self.button_rects.update(sidebar.button_rects)
         self.round_item_rects = sidebar.round_item_rects
         self.speed_rects = sidebar.speed_rects
+        self.player_rects = sidebar.player_rects
 
-    def _team_num_at_tick(self, player: str, frame_tick: int) -> int | float | None:
+    def _sidebar_player_keys(self) -> list[str]:
+        if self.round_cache is None:
+            return []
+        round_players = getattr(self.round_cache.renderer, "round_players", None)
+        if round_players is not None and getattr(round_players, "ordered_steamids", None):
+            return [str(steamid) for steamid in round_players.ordered_steamids]
+        return [str(player) for player in getattr(self.round_cache.renderer, "players", [])]
+
+    def _sidebar_player_entries(self, frame_tick: int) -> list[SidebarPlayerEntry]:
+        if self.round_cache is None:
+            return []
+        entries: list[SidebarPlayerEntry] = []
+        for player_key in self._sidebar_player_keys():
+            display_name = self._player_display_name(player_key)
+            player_number = self.round_cache.renderer.player_numbers.get(display_name)
+            sort_index = int(player_number) if player_number is not None else 999
+            display_number = format_hud_number(int(player_number)) if player_number is not None else "?"
+            team_num = self._team_num_at_tick(player_key, frame_tick)
+            entries.append(
+                SidebarPlayerEntry(
+                    player_id=player_key,
+                    display_name=display_name,
+                    display_number=display_number,
+                    team_num=team_num,
+                    sort_index=sort_index,
+                    label=f"{display_number}. {display_name}" if player_number is not None else display_name,
+                    match_keys=self._player_match_keys(player_key, display_name),
+                    color=team_color(team_num),
+                    checkmark_color=player_marker_number_color(team_num),
+                    selected=player_key in self.selected_players,
+                )
+            )
+        return sorted(entries, key=lambda entry: (entry.sort_index, entry.display_name, entry.player_id))
+
+    def _player_match_keys(self, player_key: str, display_name: str) -> frozenset[str]:
+        keys = {
+            player_key,
+            player_key.removeprefix("name:"),
+            display_name,
+            display_name.removeprefix("name:"),
+        }
+        return frozenset(key for key in keys if key)
+
+    def _selected_player_match_keys(self, player_entries: list[SidebarPlayerEntry]) -> set[str]:
+        if not self.selected_players:
+            return set()
+        selected_match_keys = set(self.selected_players)
+        for entry in player_entries:
+            if entry.player_id in self.selected_players:
+                selected_match_keys.update(entry.match_keys)
+        return selected_match_keys
+
+    def _player_display_name(self, player_key: str) -> str:
+        if self.round_cache is None:
+            return player_key.removeprefix("name:")
+        round_players = getattr(self.round_cache.renderer, "round_players", None)
+        if round_players is not None:
+            timeline = round_players.get_by_steamid(player_key)
+            if timeline is not None and timeline.display_name:
+                return timeline.display_name
+        return player_key.removeprefix("name:")
+
+    def _team_num_at_tick(self, player_key: str, frame_tick: int) -> int | float | None:
         if self.round_cache is None:
             return None
-        timeline = self.round_cache.renderer._player_timeline(player)
+        round_players = getattr(self.round_cache.renderer, "round_players", None)
+        if round_players is not None:
+            timeline = round_players.get_by_steamid(player_key)
+            if timeline is not None:
+                return timeline.team_at(frame_tick)
+        timeline = self.round_cache.renderer._player_timeline(player_key)
         if timeline is None:
             return None
         return timeline.team_at(frame_tick)
 
-    def _sidebar_player_label(self, player: str, frame_tick: int) -> str:
-        number = format_hud_number(self.round_cache.renderer.player_numbers[player])
-        return f"{number}. {player}"
+    def _sidebar_player_label(self, player_key: str) -> str:
+        if self.round_cache is None:
+            return player_key.removeprefix("name:")
+        player_name = self._player_display_name(player_key)
+        player_number = self.round_cache.renderer.player_numbers.get(player_name)
+        if player_number is None:
+            return player_name
+        number = format_hud_number(player_number)
+        return f"{number}. {player_name}"
+
+    def _visibility_feed_title(self) -> str:
+        if not self.selected_players:
+            return "Visibility Feed"
+        if len(self.selected_players) == 1:
+            return f"Visibility Feed · {self._player_display_name(next(iter(self.selected_players)))}"
+        return f"Visibility Feed · {len(self.selected_players)} players"
+
+    def _visibility_feed_empty_text(self) -> str:
+        if not self.selected_players:
+            return "No visibility events"
+        if len(self.selected_players) == 1:
+            return f"No visibility events for {self._player_display_name(next(iter(self.selected_players)))}"
+        return "No visibility events for selected players"
+
+    def _current_frame_tick(self) -> int:
+        if self.round_cache is None:
+            return 0
+        return int(self.round_cache.frame_ticks[self.playback.current_frame_index])
+
+    def _info_panel_visible_count(self) -> int:
+        return max(1, self.info_panel.viewport_rect.height // 18) if self.info_panel.viewport_rect.height > 0 else 1
+
+    def _position_hits_round_dropdown(self, position: tuple[int, int]) -> bool:
+        dropdown_button = self.button_rects.get("round_dropdown")
+        return (
+            self.round_dropdown.area_rect.collidepoint(position)
+            or self.round_dropdown.track_rect.collidepoint(position)
+            or self.round_dropdown.thumb_rect.collidepoint(position)
+            or (dropdown_button is not None and dropdown_button.collidepoint(position))
+        )
+
+    def _position_hits_info_panel(self, position: tuple[int, int]) -> bool:
+        viewport_rect = self.button_rects.get("info_panel_viewport")
+        track_rect = self.button_rects.get("info_scroll_track")
+        thumb_rect = self.button_rects.get("info_scroll_thumb")
+        return (
+            (viewport_rect is not None and viewport_rect.collidepoint(position))
+            or (track_rect is not None and track_rect.width > 0 and track_rect.collidepoint(position))
+            or (thumb_rect is not None and thumb_rect.width > 0 and thumb_rect.collidepoint(position))
+        )
+
+    def _sidebar_event_lines(self, frame_tick: int) -> list[str]:
+        if self.round_cache is None:
+            return [self._visibility_feed_empty_text()]
+        player_entries = self._sidebar_player_entries(frame_tick)
+        filtered_events = filter_events_by_players(
+            self.visibility_events,
+            self._selected_player_match_keys(player_entries),
+        )
+        visible_lines = visible_event_lines_for_tick(
+            filtered_events,
+            round_id=self.selected_round_id,
+            current_tick=frame_tick,
+        )
+        if visible_lines == ["No visibility events"]:
+            return [self._visibility_feed_empty_text()]
+        return visible_lines
 
     def _draw_bottom_bar(self, *, content_origin_x: int, content_origin_y: int) -> None:
         if self.round_cache is None:

@@ -44,6 +44,16 @@ Demo
 → Viewer
 ```
 
+当前 viewer sidebar 已经从旧的 round overview / per-player 信息面板，切到：
+
+```text
+Players list
+→ selection
+→ Visibility Feed
+```
+
+也就是说，近期 viewer 的信息侧栏主线是围绕 precomputed visibility feed 做交互，而不是继续在 sidebar 里堆叠原始状态字段。
+
 ---
 
 # CLI 方向
@@ -189,6 +199,15 @@ Event Layer
 4. `Perception Layer`
    区分“理论可见”和“理论上容易注意到”
 
+当前已落地的 viewer 消费方式：
+
+* `info_events.py` 只读取 precomputed `visibility.parquet`
+* viewer startup 会一次性 preload all-round visibility feed
+* round 切换和 Players selection 只过滤已有 `InfoEvent`
+* 不重新读取 parquet
+* 不重新 build spotted events
+* artifact 缺少 `observer_steamid / target_steamid` 时，当前 viewer 通过 display-name alias 做兼容过滤
+
 ## Map-Scoped Visibility Runtime
 
 在进入 batch 之前，先要完成一层稳定的 map-scoped runtime，把单 dataset visibility reconstruction 从 viewer 数据流里独立出来。
@@ -216,6 +235,9 @@ MatchDataset
 
 * `visibility.parquet` 已作为默认 pair-level artifact 落盘
 * viewer 已与默认 geometry cache 初始化解耦
+* viewer sidebar 已基于 `InfoEvent` 展示 visibility spotted feed
+* Players list selection 内部 key 已优先使用 Steam64
+* 当前仍需长期补齐 artifact 导出的 `observer_steamid / target_steamid`
 * 后续 batch 仍然需要单独命令和 map-grouped worker 设计
 
 ## Visibility Batch
@@ -497,17 +519,18 @@ Evidence Episode
 当前推荐路线：
 
 1. Player / Bomb / Viewer decoupling 收尾
-2. Region System
-3. UtilityTimeline：烟、闪、火、雷的有效窗口
-4. SoundExposure：谁在何时能听到什么
-5. Viewer 继续消费 precomputed visibility / unavailable fallback
-6. Visibility Batch：按地图分组复用 checker
-7. Player Information Panel：展示 visible / heard / bomb / utility
-8. InformationState 表落盘
-9. PositionContextEpisode
-10. Behavior primitives
-11. Action explanation / evidence aggregation
-12. Statistics / ML
+2. Visibility artifact 补齐 `observer_steamid / target_steamid`
+3. Region System
+4. UtilityTimeline：烟、闪、火、雷的有效窗口
+5. SoundExposure：谁在何时能听到什么
+6. Viewer 继续消费 precomputed visibility / unavailable fallback
+7. Visibility Batch：按地图分组复用 checker
+8. Player Information Panel：展示 visible / heard / bomb / utility
+9. InformationState 表落盘
+10. PositionContextEpisode
+11. Behavior primitives
+12. Action explanation / evidence aggregation
+13. Statistics / ML
 
 ---
 

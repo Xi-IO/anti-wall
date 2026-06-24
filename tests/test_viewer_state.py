@@ -4,7 +4,7 @@ import unittest
 
 import pygame
 
-from wall.viewer.state import PlaybackState, RoundDropdownState
+from wall.viewer.state import PlaybackState, RoundDropdownState, SidebarInfoPanelState
 
 
 class PlaybackStateTests(unittest.TestCase):
@@ -53,6 +53,46 @@ class RoundDropdownStateTests(unittest.TestCase):
         state.update_from_mouse(90, total_count=10)
 
         self.assertGreater(state.start_index, 0)
+
+
+class SidebarInfoPanelStateTests(unittest.TestCase):
+    def test_scroll_clamps_to_available_lines(self) -> None:
+        state = SidebarInfoPanelState(start_index=0)
+
+        state.scroll(-5, total_count=12, visible_count=4)
+
+        self.assertEqual(state.start_index, 5)
+        self.assertFalse(state.stick_to_latest)
+
+    def test_drag_updates_start_index_from_thumb_position(self) -> None:
+        state = SidebarInfoPanelState()
+        state.track_rect = pygame.Rect(0, 20, 14, 100)
+        state.thumb_rect = pygame.Rect(2, 20, 10, 30)
+
+        state.update_from_mouse(95, total_count=15, visible_count=5)
+
+        self.assertGreater(state.start_index, 0)
+
+    def test_defaults_to_stick_to_latest(self) -> None:
+        state = SidebarInfoPanelState()
+
+        self.assertTrue(state.stick_to_latest)
+
+    def test_snap_to_latest_moves_to_bottom(self) -> None:
+        state = SidebarInfoPanelState(start_index=0, stick_to_latest=False)
+
+        state.snap_to_latest(total_count=12, visible_count=4)
+
+        self.assertEqual(state.start_index, 8)
+        self.assertTrue(state.stick_to_latest)
+
+    def test_scrolling_to_bottom_restores_stick_to_latest(self) -> None:
+        state = SidebarInfoPanelState(start_index=5, stick_to_latest=False)
+
+        state.scroll(-3, total_count=12, visible_count=4)
+
+        self.assertEqual(state.start_index, 8)
+        self.assertTrue(state.stick_to_latest)
 
 
 if __name__ == "__main__":

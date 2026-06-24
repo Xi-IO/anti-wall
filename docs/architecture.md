@@ -152,6 +152,7 @@ demo file
   - staged startup / loading screen
   - 播放状态推进
   - sidebar / timeline 交互
+  - Players 选中状态和 visibility feed 过滤协调
 - `loading.py`
   - viewer 后台 dataset loading 协调
 - `runtime.py`
@@ -165,10 +166,16 @@ demo file
   - 下拉面板等布局计算
 - `ui.py`
   - sidebar / bottom bar / 图标等 UI 绘制辅助
+- `info_events.py`
+  - 从 `visibility.parquet` 读取和适配 schema
+  - 构建 pair-local visibility spotted events
+  - 提供按 tick / player filter 的 feed 辅助函数
 - `renderer.py`
   - 一帧渲染总协调器
 - `render_player.py`
   - 玩家相关纯绘制
+- `player_palette.py`
+  - 玩家 marker 数字颜色和 sidebar check mark 共享色板
 - `render_sound.py`
   - 声音圈和标签绘制
 - `render_bomb.py`
@@ -185,7 +192,9 @@ demo file
 边界：
 
 - 负责“如何展示”
-- 不应该重新解释 raw DataFrame
+- `shell.py` 不应直接知道 `visibility.parquet` 路径、schema 或 pair-local 状态机细节
+- `ui.py` 只接收已组织好的 lines / entries / state，不直接读取 parquet 或构建事件
+- `info_events.py` 不 import `pygame`
 - 不应该复制 domain 已经表达过的 gameplay 规则
 
 ### 6. Render support layer
@@ -278,8 +287,20 @@ viewer 路径：
 dataset
   -> DatasetIndex
   -> round-scoped RoundData build
+  -> all-round visibility info-event preload
   -> RoundData semantic viewer input
   -> renderer
+```
+
+viewer sidebar feed 路径：
+
+```text
+dataset
+  -> visibility.parquet
+  -> viewer.info_events.load_info_events_for_dataset(...)
+  -> list[InfoEvent]
+  -> shell selection / current_tick filter
+  -> ui lines / scroll state
 ```
 
 visibility reconstruction 路径：
@@ -314,6 +335,14 @@ viewer 当前应优先消费：
 - `round_start_tick`
 
 而不是重新在 viewer 内部直接过滤原始表。
+
+但 sidebar 的 visibility feed 例外地直接消费 precomputed artifact：
+
+- feed 数据来自 `visibility.parquet`
+- viewer 启动时一次性 preload all-round `InfoEvent`
+- round 切换和 player selection 只过滤已加载事件
+- 不重新读取 parquet
+- 不重新 build spotted events
 
 普通 viewer 打开 dataset 时：
 
@@ -438,6 +467,10 @@ Awpy 的 `maps / navs / tris` 视为运行时外部资产：
 - visibility reconstruction 已独立到 `src/wall/visibility/`，并保持统一的 `VisibilityResultSet -> writer` 路径
 - 普通 viewer 已与默认 `awpy.VisibilityChecker` / geometry cache 初始化解耦
 - `visibility.parquet` 已成为 parse 后默认生成的 pair-level artifact
+- viewer sidebar 已切到 visibility event feed，不再显示旧的 round overview / per-player info 面板
+- visibility event feed 已收口到 `viewer/info_events.py`
+- Players 列表已支持按内部稳定 key 选中，并以 alias fallback 兼容缺少 steamid 的 visibility artifact
+- feed scroll 默认 stick-to-latest，只有用户手动滚动离开底部时才停止自动跟随
 - assets 已按 effects / equipment / ui 分类
 - viewer 当前主路径已主要消费 semantic objects，而不是长串原始表参数
 
@@ -447,8 +480,9 @@ Awpy 的 `maps / navs / tris` 视为运行时外部资产：
 
 1. 补少量纯 helper 单测
 2. 继续压缩 `renderer.py` 的协调复杂度
-3. 保持新功能先扩 domain，再进 viewer
-4. 保持 `docs/` 中的架构文档、roadmap、checklist 同步
+3. 继续把 visibility artifact 导出补齐 `observer_steamid / target_steamid`
+4. 保持新功能先扩 domain，再进 viewer
+5. 保持 `docs/` 中的架构文档、roadmap、checklist 同步
 
 ## Related Docs
 

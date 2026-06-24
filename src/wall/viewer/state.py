@@ -114,3 +114,63 @@ class RoundDropdownState:
 
     def visible_round_ids(self, round_ids: list[int]) -> list[int]:
         return round_ids[self.start_index : self.start_index + self.visible_count]
+
+
+@dataclass
+class SidebarInfoPanelState:
+    start_index: int = 0
+    stick_to_latest: bool = True
+    dragging_scroll: bool = False
+    viewport_rect: pygame.Rect = field(default_factory=lambda: pygame.Rect(0, 0, 0, 0))
+    track_rect: pygame.Rect = field(default_factory=lambda: pygame.Rect(0, 0, 0, 0))
+    thumb_rect: pygame.Rect = field(default_factory=lambda: pygame.Rect(0, 0, 0, 0))
+
+    def reset_layout(self) -> None:
+        self.viewport_rect = pygame.Rect(0, 0, 0, 0)
+        self.track_rect = pygame.Rect(0, 0, 0, 0)
+        self.thumb_rect = pygame.Rect(0, 0, 0, 0)
+
+    def max_start(self, total_count: int, visible_count: int) -> int:
+        return max(0, total_count - max(1, visible_count))
+
+    def is_at_latest(self, total_count: int, visible_count: int) -> bool:
+        return self.start_index >= self.max_start(total_count, visible_count)
+
+    def snap_to_latest(self, total_count: int, visible_count: int) -> None:
+        self.start_index = self.max_start(total_count, visible_count)
+        self.stick_to_latest = True
+
+    def clamp_start(self, total_count: int, visible_count: int) -> None:
+        max_start = self.max_start(total_count, visible_count)
+        self.start_index = max(0, min(self.start_index, max_start))
+        if self.stick_to_latest:
+            self.start_index = max_start
+
+    def scroll(self, delta: int, total_count: int, visible_count: int) -> None:
+        max_start = self.max_start(total_count, visible_count)
+        self.start_index = max(0, min(self.start_index - delta, max_start))
+        self.stick_to_latest = self.start_index >= max_start
+
+    def jump_to_mouse(self, mouse_y: int, total_count: int, visible_count: int) -> None:
+        if total_count <= visible_count or self.track_rect.height <= 0:
+            return
+        max_start = self.max_start(total_count, visible_count)
+        relative_y = mouse_y - self.track_rect.y
+        ratio = max(0.0, min(1.0, relative_y / max(1, self.track_rect.height)))
+        self.start_index = int(round(ratio * max_start))
+        self.stick_to_latest = self.start_index >= max_start
+
+    def update_from_mouse(self, mouse_y: int, total_count: int, visible_count: int) -> None:
+        if total_count <= visible_count or self.track_rect.height <= 0 or self.thumb_rect.height <= 0:
+            return
+        max_start = self.max_start(total_count, visible_count)
+        thumb_half = self.thumb_rect.height / 2
+        relative_y = mouse_y - self.track_rect.y - thumb_half
+        thumb_travel = max(1.0, self.track_rect.height - self.thumb_rect.height)
+        ratio = max(0.0, min(1.0, relative_y / thumb_travel))
+        self.start_index = int(round(ratio * max_start))
+        self.stick_to_latest = self.start_index >= max_start
+
+    def visible_lines(self, lines: list[str], visible_count: int) -> list[str]:
+        visible = max(1, visible_count)
+        return lines[self.start_index : self.start_index + visible]
