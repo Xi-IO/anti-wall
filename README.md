@@ -48,6 +48,13 @@ pip install -e .[dev]
 pip install -e .[dev]
 ```
 
+如果你跟当前仓库里的测试和 viewer 工作流保持一致，推荐直接使用现有的 `wall` conda 环境：
+
+```powershell
+conda activate wall
+pip install -e .[dev]
+```
+
 安装完成后可以直接使用：
 
 ```powershell
@@ -150,6 +157,17 @@ wall outputs\match730_003825715054175584453_1941916173_129
 - 多回合默认合并成一张总表
 - 默认跳过 freeze time
 - 默认 `jobs = 4`，但实际 worker 数不会超过回合数
+
+普通 viewer 当前只消费 dataset 中已经落盘的 `visibility.parquet`：
+
+- 如果存在 `visibility.parquet`
+  - viewer 会在启动时预加载 all-round visibility feed
+  - sidebar 直接显示 spotted events
+- 如果不存在 `visibility.parquet`
+  - viewer 仍然可以正常打开
+  - 只是 visibility feed 为空
+
+普通 viewer 不会在启动时现场创建 Awpy `VisibilityChecker` 或重建 geometry visibility。
 
 最常用命令：
 
@@ -283,6 +301,19 @@ wall outputs\match730_003825715054175584453_1941916173_129 --round 1
 - 地图内显示固定 HUD 编号和玩家 ID
 - 掉血闪红、死亡叉、枪口火光和 tracer
 - 基于 Awpy 地图底图显示玩家移动
+- 右侧 `Players` 列表支持点击选中 / 取消选中玩家
+- sidebar 下半部分显示 `Visibility Feed`
+- 当未选中玩家时，feed 显示当前 tick 之前的全部 spotted events
+- 当选中一个或多个玩家时，feed 只显示与这些玩家有关的事件
+- info feed 默认自动跟随最新事件；只有手动把滚动条拉上去时才停止自动跟随
+
+当前 visibility feed 文本格式类似：
+
+```text
+80.30s  playerA spotted playerB
+```
+
+`Players` 列表的内部选择 key 当前优先使用 Steam64；如果现有 `visibility.parquet` 里还没有 `observer_steamid / target_steamid`，viewer 会自动回退到 display name alias 做过滤匹配，因此 UI 里仍然只显示游戏内名字，不显示 Steam64。
 
 如果当前地图的 `maps` 资产缺失，viewer 启动前会先提示是否下载。
 
