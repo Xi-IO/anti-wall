@@ -34,6 +34,7 @@ pip-wheel-metadata/
 outputs/
 outputs_player/
 tmp_*/
+tmp_test_*/
 tmp_test_assets/
 *.duckdb
 *.duckdb.wal
