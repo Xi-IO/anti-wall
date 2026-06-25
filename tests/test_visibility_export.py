@@ -10,11 +10,13 @@ import uuid
 import pandas as pd
 
 import wall.analysis.visibility_export as visibility_export
+import wall.visibility.export as visibility_export_impl
 from wall.analysis.visibility_export import (
     build_visibility_summary_table,
     build_visibility_table,
     build_visibility_result_set,
     export_visibility_table,
+    VisibilityResultRow,
     profile_los_overlap,
     run_visibility_export,
     run_visibility_exports,
@@ -239,8 +241,9 @@ class VisibilityExportTests(unittest.TestCase):
 
         self.assertEqual(table["observer"].tolist(), ["observer"])
         self.assertEqual(table["target"].tolist(), ["enemy_front"])
-        self.assertEqual(table["in_fov"].tolist(), [True])
-        self.assertEqual(table["is_visible"].tolist(), [True])
+        self.assertEqual(table["start_tick"].tolist(), [100])
+        self.assertEqual(table["end_tick"].tolist(), [100])
+        self.assertEqual(table["state"].tolist(), ["UNKNOWN"])
 
     def test_build_visibility_table_samples_ticks(self) -> None:
         ticks = pd.DataFrame(
@@ -282,7 +285,7 @@ class VisibilityExportTests(unittest.TestCase):
         )
         table = build_visibility_table(round_data, tick_step=2)
 
-        self.assertEqual(sorted(table["tick"].unique().tolist()), [102])
+        self.assertEqual(sorted(table["start_tick"].unique().tolist()), [102])
 
     def test_build_visibility_summary_table_aggregates_visible_targets(self) -> None:
         table = build_visibility_summary_table(
@@ -311,7 +314,7 @@ class VisibilityExportTests(unittest.TestCase):
             tick=100,
         )
 
-        self.assertEqual(sorted(table["tick"].unique().tolist()), [100])
+        self.assertEqual(sorted(table["start_tick"].unique().tolist()), [100])
 
     def test_export_visibility_table_writes_csv(self) -> None:
         data_dir = make_test_dir()
@@ -343,8 +346,9 @@ class VisibilityExportTests(unittest.TestCase):
             self.assertTrue(output_path.exists())
             exported = pd.read_csv(output_path)
             self.assertEqual(exported["target"].tolist(), ["enemy_front"])
-            self.assertIn("has_los", exported.columns)
-            self.assertIn("is_visible", exported.columns)
+            self.assertIn("start_tick", exported.columns)
+            self.assertIn("distance_mean", exported.columns)
+            self.assertIn("state", exported.columns)
         finally:
             shutil.rmtree(data_dir, ignore_errors=True)
 
@@ -453,6 +457,7 @@ class VisibilityExportTests(unittest.TestCase):
             self.assertTrue(result.output_path.exists())
             exported = pd.read_csv(result.output_path)
             self.assertEqual(exported["target"].tolist(), ["enemy_front"])
+            self.assertIn("state", exported.columns)
         finally:
             shutil.rmtree(data_dir, ignore_errors=True)
 
@@ -506,6 +511,8 @@ class VisibilityExportTests(unittest.TestCase):
                 "round_id",
                 "observer",
                 "target",
+                "observer_key",
+                "target_key",
                 "distance",
                 "relative_yaw_deg",
                 "in_fov",
@@ -552,6 +559,8 @@ class VisibilityExportTests(unittest.TestCase):
                 "round_id",
                 "observer",
                 "target",
+                "observer_key",
+                "target_key",
                 "observer_team",
                 "target_team",
                 "observer_x",
@@ -568,6 +577,67 @@ class VisibilityExportTests(unittest.TestCase):
                 "is_visible",
             },
         )
+
+    def test_interval_writer_merges_same_state_and_aggregates_metrics(self) -> None:
+        result_set = visibility_export.VisibilityResultSet(
+            round_id=1,
+            output_kind="interval",
+            rows=(
+                VisibilityResultRow(100, 1, "obs", "tgt", "s_obs", "s_tgt", 2, 3, None, None, None, None, None, None, None, 10.0, -20.0, True, True, True),
+                VisibilityResultRow(101, 1, "obs", "tgt", "s_obs", "s_tgt", 2, 3, None, None, None, None, None, None, None, 20.0, 10.0, True, True, True),
+                VisibilityResultRow(102, 1, "obs", "tgt", "s_obs", "s_tgt", 2, 3, None, None, None, None, None, None, None, 15.0, -30.0, True, True, True),
+            ),
+        )
+
+        table = visibility_export_impl._result_rows_to_interval_table(
+            result_set,
+            tick_to_seconds={100: 0.0, 101: 1.0, 102: 2.0},
+            only_visible=False,
+        )
+
+        self.assertEqual(len(table), 1)
+        row = table.iloc[0]
+        self.assertEqual(row["start_tick"], 100)
+        self.assertEqual(row["end_tick"], 102)
+        self.assertEqual(row["sample_count"], 3)
+        self.assertEqual(row["state"], "VISIBLE")
+        self.assertEqual(row["distance_start"], 10.0)
+        self.assertEqual(row["distance_end"], 15.0)
+        self.assertEqual(row["distance_min"], 10.0)
+        self.assertEqual(row["distance_max"], 20.0)
+        self.assertEqual(row["distance_mean"], 15.0)
+        self.assertEqual(row["relative_yaw_start"], -20.0)
+        self.assertEqual(row["relative_yaw_end"], -30.0)
+        self.assertEqual(row["relative_yaw_min"], -30.0)
+        self.assertEqual(row["relative_yaw_max"], 10.0)
+        self.assertEqual(row["relative_yaw_abs_min"], 10.0)
+        self.assertEqual(row["relative_yaw_abs_mean"], 20.0)
+        self.assertEqual(row["relative_yaw_abs_max"], 30.0)
+
+    def test_interval_writer_splits_on_state_changes_and_preserves_out_of_fov_null_los(self) -> None:
+        result_set = visibility_export.VisibilityResultSet(
+            round_id=1,
+            output_kind="interval",
+            rows=(
+                VisibilityResultRow(100, 1, "obs", "tgt", "s_obs", "s_tgt", 2, 3, None, None, None, None, None, None, None, 10.0, 0.0, False, None, False),
+                VisibilityResultRow(101, 1, "obs", "tgt", "s_obs", "s_tgt", 2, 3, None, None, None, None, None, None, None, 11.0, 1.0, False, None, False),
+                VisibilityResultRow(102, 1, "obs", "tgt", "s_obs", "s_tgt", 2, 3, None, None, None, None, None, None, None, 12.0, 2.0, True, False, False),
+                VisibilityResultRow(103, 1, "obs", "tgt", "s_obs", "s_tgt", 2, 3, None, None, None, None, None, None, None, 13.0, 3.0, True, True, True),
+            ),
+        )
+
+        table = visibility_export_impl._result_rows_to_interval_table(
+            result_set,
+            tick_to_seconds={100: 0.0, 101: 1.0, 102: 2.0, 103: 3.0},
+            only_visible=False,
+        )
+
+        self.assertEqual(table["state"].tolist(), ["OUT_OF_FOV", "IN_FOV_BLOCKED", "VISIBLE"])
+        self.assertTrue(pd.isna(table.iloc[0]["has_los"]))
+        self.assertEqual(table.iloc[0]["start_tick"], 100)
+        self.assertEqual(table.iloc[0]["end_tick"], 101)
+        self.assertEqual(table.iloc[1]["start_tick"], 102)
+        self.assertEqual(table.iloc[2]["start_tick"], 103)
 
     def test_run_visibility_exports_centralizes_map_context_for_single_dataset(self) -> None:
         data_dir = make_test_dir()
@@ -589,7 +659,7 @@ class VisibilityExportTests(unittest.TestCase):
             result = run_visibility_exports(
                 data_dir,
                 round_ids=[1, 2],
-                output_kind="pair",
+                output_kind="interval",
                 tickrate=64.0,
                 table_format="csv",
                 jobs=1,
@@ -614,7 +684,7 @@ class VisibilityExportTests(unittest.TestCase):
             sequential = run_visibility_exports(
                 data_dir,
                 round_ids=[1, 2],
-                output_kind="pair",
+                output_kind="interval",
                 tickrate=64.0,
                 table_format="csv",
                 profile_visibility=True,
@@ -629,7 +699,7 @@ class VisibilityExportTests(unittest.TestCase):
             parallel = run_visibility_exports(
                 data_dir,
                 round_ids=[1, 2],
-                output_kind="pair",
+                output_kind="interval",
                 tickrate=64.0,
                 table_format="csv",
                 profile_visibility=True,
@@ -659,7 +729,7 @@ class VisibilityExportTests(unittest.TestCase):
             result = run_visibility_exports(
                 data_dir,
                 round_ids=[1, 2],
-                output_kind="pair",
+                output_kind="interval",
                 tickrate=64.0,
                 table_format="csv",
                 profile_visibility=True,
@@ -687,7 +757,7 @@ class VisibilityExportTests(unittest.TestCase):
             result = run_visibility_exports(
                 data_dir,
                 round_ids=[1, 2],
-                output_kind="pair",
+                output_kind="interval",
                 tickrate=64.0,
                 table_format="csv",
                 jobs=2,
@@ -696,9 +766,9 @@ class VisibilityExportTests(unittest.TestCase):
 
             self.assertIsNotNone(result.output_paths)
             assert result.output_paths is not None
-            combined_path = result.output_paths["pair"]
+            combined_path = result.output_paths["interval"]
             self.assertTrue(combined_path.exists())
-            self.assertIn("all_rounds", combined_path.name)
+            self.assertEqual(combined_path.name, "visibility.csv")
             exported = pd.read_csv(combined_path)
             self.assertEqual(sorted(exported["round_id"].unique().tolist()), [1, 2])
         finally:
@@ -797,7 +867,7 @@ class VisibilityExportTests(unittest.TestCase):
             self.assertIn("Visibility Progress", rendered)
             self.assertIn("1/2", rendered)
             self.assertIn("2/2", rendered)
-            self.assertIn("all_rounds", rendered)
+            self.assertIn("visibility.csv", rendered)
             self.assertNotIn("round_01", rendered)
             self.assertNotIn("round_02", rendered)
         finally:

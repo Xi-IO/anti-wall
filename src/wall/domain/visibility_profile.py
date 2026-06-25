@@ -31,6 +31,10 @@ class VisibilityProfile:
     los_seconds: float = 0.0
     cache_serialization_seconds: float = 0.0
     cache_file_writing_seconds: float = 0.0
+    interval_compress_seconds: float = 0.0
+    interval_writer_seconds: float = 0.0
+    raw_pair_writer_seconds: float = 0.0
+    metadata_writer_seconds: float = 0.0
     summary_writer_seconds: float = 0.0
     pair_writer_seconds: float = 0.0
     total_ticks_visited: int = 0
@@ -143,6 +147,10 @@ class VisibilityProfile:
         self.los_seconds += other.los_seconds
         self.cache_serialization_seconds += other.cache_serialization_seconds
         self.cache_file_writing_seconds += other.cache_file_writing_seconds
+        self.interval_compress_seconds += other.interval_compress_seconds
+        self.interval_writer_seconds += other.interval_writer_seconds
+        self.raw_pair_writer_seconds += other.raw_pair_writer_seconds
+        self.metadata_writer_seconds += other.metadata_writer_seconds
         self.total_ticks_visited += other.total_ticks_visited
         self.sampled_ticks_visited += other.sampled_ticks_visited
         self.alive_players_processed += other.alive_players_processed
@@ -210,6 +218,11 @@ class VisibilityProfile:
             f"{'LOS / checker.is_visible() time':36} {self.los_seconds:12.3f}",
             f"{'cache serialization time':36} {self.cache_serialization_seconds:12.3f}",
             f"{'cache file writing time':36} {self.cache_file_writing_seconds:12.3f}",
+            f"{'visibility.raw_pair_compute':36} {self.pair_writer_seconds:12.3f}",
+            f"{'visibility.interval_compress':36} {self.interval_compress_seconds:12.3f}",
+            f"{'visibility.write_interval':36} {self.interval_writer_seconds:12.3f}",
+            f"{'visibility.write_raw_pair optional':36} {self.raw_pair_writer_seconds:12.3f}",
+            f"{'visibility.write_metadata':36} {self.metadata_writer_seconds:12.3f}",
         ]
         lines.extend(
             [

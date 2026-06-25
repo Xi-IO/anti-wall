@@ -17,6 +17,10 @@ except ModuleNotFoundError:
 
 VISIBILITY_EVENT_KIND = "visibility_spotted"
 VISIBILITY_REDISCOVERY_GAP_SECONDS = 2.0
+UNSUPPORTED_VISIBILITY_SCHEMA_MESSAGE = (
+    "visibility.parquet uses an unsupported visibility schema. "
+    "Re-run `wall visibility <dataset_dir>` to generate the interval visibility artifact."
+)
 
 
 @dataclass(frozen=True)
@@ -33,35 +37,40 @@ class InfoEvent:
 
 
 @dataclass(frozen=True)
-class VisibilityArtifactSchema:
+class VisibilityIntervalSchema:
     round_id_column: str
-    tick_column: str
-    observer_key_column: str
-    target_key_column: str
     observer_column: str
     target_column: str
-    is_visible_column: str
-    seconds_column: str | None
-    observer_team_column: str | None
-    target_team_column: str | None
+    observer_key_column: str | None
+    target_key_column: str | None
+    start_tick_column: str
+    end_tick_column: str
+    start_seconds_column: str | None
+    end_seconds_column: str | None
+    is_visible_column: str | None
+    state_column: str | None
 
     @property
-    def required_columns(self) -> list[str]:
+    def projected_columns(self) -> list[str]:
         columns = [
             self.round_id_column,
-            self.tick_column,
-            self.observer_key_column,
-            self.target_key_column,
             self.observer_column,
             self.target_column,
-            self.is_visible_column,
+            self.start_tick_column,
+            self.end_tick_column,
         ]
-        if self.seconds_column is not None:
-            columns.append(self.seconds_column)
-        if self.observer_team_column is not None:
-            columns.append(self.observer_team_column)
-        if self.target_team_column is not None:
-            columns.append(self.target_team_column)
+        if self.observer_key_column is not None:
+            columns.append(self.observer_key_column)
+        if self.target_key_column is not None:
+            columns.append(self.target_key_column)
+        if self.start_seconds_column is not None:
+            columns.append(self.start_seconds_column)
+        if self.end_seconds_column is not None:
+            columns.append(self.end_seconds_column)
+        if self.is_visible_column is not None:
+            columns.append(self.is_visible_column)
+        if self.state_column is not None:
+            columns.append(self.state_column)
         return list(dict.fromkeys(columns))
 
 
@@ -72,49 +81,6 @@ def _pick_first(columns: set[str], candidates: tuple[str, ...]) -> str | None:
     return None
 
 
-def resolve_visibility_artifact_schema(columns: list[str]) -> VisibilityArtifactSchema | None:
-    column_set = set(columns)
-    round_id_column = _pick_first(column_set, ("round_id", "inferred_round_id"))
-    tick_column = _pick_first(column_set, ("tick",))
-    observer_key_column = _pick_first(column_set, ("observer_steamid", "observer", "observer_name"))
-    target_key_column = _pick_first(column_set, ("target_steamid", "target", "target_name"))
-    observer_column = _pick_first(column_set, ("observer", "observer_name", "observer_steamid"))
-    target_column = _pick_first(column_set, ("target", "target_name", "target_steamid"))
-    is_visible_column = _pick_first(column_set, ("is_visible", "visible", "visibility"))
-    if None in {
-        round_id_column,
-        tick_column,
-        observer_key_column,
-        target_key_column,
-        observer_column,
-        target_column,
-        is_visible_column,
-    }:
-        return None
-    return VisibilityArtifactSchema(
-        round_id_column=round_id_column,
-        tick_column=tick_column,
-        observer_key_column=observer_key_column,
-        target_key_column=target_key_column,
-        observer_column=observer_column,
-        target_column=target_column,
-        is_visible_column=is_visible_column,
-        seconds_column=_pick_first(column_set, ("seconds", "round_seconds", "inferred_round_seconds")),
-        observer_team_column=_pick_first(column_set, ("observer_team", "observer_team_num")),
-        target_team_column=_pick_first(column_set, ("target_team", "target_team_num")),
-    )
-
-
-def _round_start_ticks(inferred_rounds: pd.DataFrame) -> dict[int, int]:
-    if inferred_rounds.empty or "inferred_round_id" not in inferred_rounds.columns or "start_tick" not in inferred_rounds.columns:
-        return {}
-    work = inferred_rounds.loc[:, ["inferred_round_id", "start_tick"]].copy()
-    work["inferred_round_id"] = pd.to_numeric(work["inferred_round_id"], errors="coerce")
-    work["start_tick"] = pd.to_numeric(work["start_tick"], errors="coerce")
-    work = work.dropna(subset=["inferred_round_id", "start_tick"])
-    return {int(row["inferred_round_id"]): int(row["start_tick"]) for _, row in work.iterrows()}
-
-
 def _coerce_text(value: object) -> str:
     if value is None:
         return ""
@@ -122,13 +88,6 @@ def _coerce_text(value: object) -> str:
     if text.lower() in {"", "nan", "none", "<na>"}:
         return ""
     return text
-
-
-def _normalize_player_key(value: object, display_value: object) -> str:
-    key = _coerce_text(value)
-    if key:
-        return key
-    return _coerce_text(display_value)
 
 
 def _coerce_bool(value: object) -> bool:
@@ -143,6 +102,11 @@ def _coerce_bool(value: object) -> bool:
     if pd.notna(numeric):
         return bool(int(numeric))
     return bool(value)
+
+
+def _normalize_player_key(value: object, display_value: object) -> str:
+    key = _coerce_text(value)
+    return key or _coerce_text(display_value)
 
 
 def _visibility_artifact_path(loaded_data: Any) -> Path:
@@ -184,35 +148,67 @@ def _profile_info_events_stage(
     )
 
 
-def _seconds_series(
-    visibility_table: pd.DataFrame,
-    *,
-    schema: VisibilityArtifactSchema,
-    inferred_rounds: pd.DataFrame,
-    tickrate: float,
-) -> pd.Series:
-    if schema.seconds_column is not None and schema.seconds_column in visibility_table.columns:
-        numeric = pd.to_numeric(visibility_table[schema.seconds_column], errors="coerce")
-        if numeric.notna().any():
-            return numeric.astype(float)
-    start_ticks = _round_start_ticks(inferred_rounds)
-    round_ids = pd.to_numeric(visibility_table[schema.round_id_column], errors="coerce")
-    ticks = pd.to_numeric(visibility_table[schema.tick_column], errors="coerce")
+def validate_visibility_interval_schema(columns: list[str]) -> None:
+    column_set = set(columns)
+    has_old_pair_shape = "tick" in column_set and "is_visible" in column_set and (
+        "start_tick" not in column_set or "end_tick" not in column_set
+    )
+    required_base = {"round_id", "observer", "target", "start_tick", "end_tick"}
+    has_state_signal = "is_visible" in column_set or "state" in column_set
+    if has_old_pair_shape or not required_base.issubset(column_set) or not has_state_signal:
+        raise ValueError(UNSUPPORTED_VISIBILITY_SCHEMA_MESSAGE)
+
+
+def resolve_visibility_interval_schema(columns: list[str]) -> VisibilityIntervalSchema:
+    validate_started_at = time.perf_counter()
+    _profile_info_events_stage(
+        "viewer.info_events.visibility_schema_validate.start",
+        selected_columns=columns,
+    )
+    validate_visibility_interval_schema(columns)
+    column_set = set(columns)
+    schema = VisibilityIntervalSchema(
+        round_id_column="round_id",
+        observer_column="observer",
+        target_column="target",
+        observer_key_column=_pick_first(column_set, ("observer_key", "observer_steamid")),
+        target_key_column=_pick_first(column_set, ("target_key", "target_steamid")),
+        start_tick_column="start_tick",
+        end_tick_column="end_tick",
+        start_seconds_column=_pick_first(column_set, ("start_seconds",)),
+        end_seconds_column=_pick_first(column_set, ("end_seconds",)),
+        is_visible_column=_pick_first(column_set, ("is_visible",)),
+        state_column=_pick_first(column_set, ("state",)),
+    )
+    _profile_info_events_stage(
+        "viewer.info_events.visibility_schema_validate.end",
+        started_at=validate_started_at,
+        selected_columns=schema.projected_columns,
+    )
+    return schema
+
+
+def _round_start_ticks(inferred_rounds: pd.DataFrame) -> dict[int, int]:
+    if inferred_rounds.empty or "inferred_round_id" not in inferred_rounds.columns or "start_tick" not in inferred_rounds.columns:
+        return {}
+    work = inferred_rounds.loc[:, ["inferred_round_id", "start_tick"]].copy()
+    work["inferred_round_id"] = pd.to_numeric(work["inferred_round_id"], errors="coerce")
+    work["start_tick"] = pd.to_numeric(work["start_tick"], errors="coerce")
+    work = work.dropna(subset=["inferred_round_id", "start_tick"])
+    return {int(row["inferred_round_id"]): int(row["start_tick"]) for _, row in work.iterrows()}
+
+
+def _derived_seconds(round_id: int, tick: int, *, start_ticks: dict[int, int], tickrate: float) -> float:
     effective_tickrate = tickrate if tickrate > 0 else 64.0
-    derived = [
-        ((float(tick) - float(start_ticks.get(int(round_id), int(tick)))) / effective_tickrate)
-        if pd.notna(round_id) and pd.notna(tick)
-        else 0.0
-        for round_id, tick in zip(round_ids.tolist(), ticks.tolist())
-    ]
-    return pd.Series(derived, index=visibility_table.index, dtype="float64")
+    round_start_tick = start_ticks.get(int(round_id), int(tick))
+    return (float(tick) - float(round_start_tick)) / effective_tickrate
 
 
 def _load_visibility_rows_for_dataset(
     loaded_data: Any,
     *,
     round_id: int | None,
-) -> tuple[pd.DataFrame, VisibilityArtifactSchema | None]:
+) -> tuple[pd.DataFrame, VisibilityIntervalSchema | None]:
     resolve_started_at = time.perf_counter()
     _profile_info_events_stage("info_events.visibility_artifact.resolve.start", round_id=round_id)
     artifact_path = _visibility_artifact_path(loaded_data)
@@ -226,78 +222,43 @@ def _load_visibility_rows_for_dataset(
         return pd.DataFrame(), None
     artifact_columns = _visibility_artifact_columns(artifact_path)
     if artifact_columns is None:
-        read_started_at = time.perf_counter()
-        _profile_info_events_stage(
-            "info_events.read_visibility.start",
-            round_id=round_id,
-            selected_columns="schema_fallback_pending",
-            extra_note="read_mode=full_table_schema_fallback",
-        )
-        visibility_table = pd.read_parquet(artifact_path)
-        schema = resolve_visibility_artifact_schema(list(visibility_table.columns))
-        if schema is None:
-            return pd.DataFrame(), None
-        projected_columns = schema.required_columns
-        visibility_table = visibility_table.loc[:, projected_columns].copy()
-        _profile_info_events_stage(
-            "info_events.read_visibility.end",
-            started_at=read_started_at,
-            round_id=round_id,
-            rows_before=0,
-            rows_after=len(visibility_table),
-            selected_columns=projected_columns,
-            extra_note="read_mode=full_table_schema_fallback",
-        )
+        full_table = pd.read_parquet(artifact_path)
+        schema = resolve_visibility_interval_schema(list(full_table.columns))
+        visibility_table = full_table.loc[:, schema.projected_columns].copy()
     else:
-        schema = resolve_visibility_artifact_schema(artifact_columns)
-        if schema is None:
-            return pd.DataFrame(), None
-        projected_columns = schema.required_columns
+        schema = resolve_visibility_interval_schema(artifact_columns)
         read_started_at = time.perf_counter()
         _profile_info_events_stage(
-            "info_events.read_visibility.start",
+            "viewer.info_events.load_interval_visibility.start",
             round_id=round_id,
-            selected_columns=projected_columns,
-            extra_note="read_mode=projected_all_rounds",
+            selected_columns=schema.projected_columns,
         )
-        visibility_table = pd.read_parquet(artifact_path, columns=projected_columns)
+        visibility_table = pd.read_parquet(artifact_path, columns=schema.projected_columns)
         _profile_info_events_stage(
-            "info_events.read_visibility.end",
+            "viewer.info_events.load_interval_visibility.end",
             started_at=read_started_at,
             round_id=round_id,
-            rows_before=0,
             rows_after=len(visibility_table),
-            selected_columns=projected_columns,
-            extra_note="read_mode=projected_all_rounds",
+            selected_columns=schema.projected_columns,
         )
     pre_filter_rows = len(visibility_table)
-    filter_started_at = time.perf_counter()
-    _profile_info_events_stage(
-        "info_events.filter_round.start",
-        round_id=round_id,
-        rows_before=len(visibility_table),
-        selected_columns=schema.required_columns,
-        extra_note="round_scope=all" if round_id is None else f"round_scope=single target_round_id={int(round_id)}",
-    )
     if round_id is not None:
         round_ids = pd.to_numeric(visibility_table[schema.round_id_column], errors="coerce")
         visibility_table = visibility_table.loc[round_ids == int(round_id)].copy()
     _profile_info_events_stage(
         "info_events.filter_round.end",
-        started_at=filter_started_at,
         round_id=round_id,
         rows_before=pre_filter_rows,
         rows_after=len(visibility_table),
-        selected_columns=schema.required_columns,
-        extra_note="round_scope=all" if round_id is None else f"round_scope=single target_round_id={int(round_id)}",
+        selected_columns=schema.projected_columns,
     )
     return visibility_table, schema
 
 
-def _decode_visibility_rows(
+def _decode_visibility_intervals(
     visibility_table: pd.DataFrame,
     *,
-    schema: VisibilityArtifactSchema,
+    schema: VisibilityIntervalSchema,
     inferred_rounds: pd.DataFrame,
     tickrate: float,
 ) -> pd.DataFrame:
@@ -305,57 +266,84 @@ def _decode_visibility_rows(
         return pd.DataFrame(
             columns=[
                 "round_id",
-                "tick",
                 "observer",
                 "target",
                 "observer_key",
                 "target_key",
+                "start_tick",
+                "end_tick",
+                "start_seconds",
+                "end_seconds",
                 "is_visible",
-                "seconds",
-                "observer_team",
-                "target_team",
+                "state",
             ]
         )
-    work = visibility_table.loc[:, schema.required_columns].copy()
+    start_ticks = _round_start_ticks(inferred_rounds)
+    work = visibility_table.loc[:, schema.projected_columns].copy()
     work["round_id"] = pd.to_numeric(work[schema.round_id_column], errors="coerce")
-    work["tick"] = pd.to_numeric(work[schema.tick_column], errors="coerce")
+    work["start_tick"] = pd.to_numeric(work[schema.start_tick_column], errors="coerce")
+    work["end_tick"] = pd.to_numeric(work[schema.end_tick_column], errors="coerce")
     work["observer"] = work[schema.observer_column].map(_coerce_text)
     work["target"] = work[schema.target_column].map(_coerce_text)
+    work["observer_key"] = (
+        work[schema.observer_key_column].map(_coerce_text)
+        if schema.observer_key_column is not None
+        else work["observer"].map(_coerce_text)
+    )
+    work["target_key"] = (
+        work[schema.target_key_column].map(_coerce_text)
+        if schema.target_key_column is not None
+        else work["target"].map(_coerce_text)
+    )
+    if schema.start_seconds_column is not None:
+        work["start_seconds"] = pd.to_numeric(work[schema.start_seconds_column], errors="coerce")
+    else:
+        work["start_seconds"] = pd.Series([float("nan")] * len(work), index=work.index, dtype="float64")
+    if schema.end_seconds_column is not None:
+        work["end_seconds"] = pd.to_numeric(work[schema.end_seconds_column], errors="coerce")
+    else:
+        work["end_seconds"] = pd.Series([float("nan")] * len(work), index=work.index, dtype="float64")
+    if schema.is_visible_column is not None:
+        work["is_visible"] = work[schema.is_visible_column].map(_coerce_bool)
+    else:
+        work["is_visible"] = False
+    work["state"] = "" if schema.state_column is None else work[schema.state_column].map(_coerce_text)
+    work = work.dropna(subset=["round_id", "start_tick", "end_tick"])
+    work = work[(work["observer"] != "") & (work["target"] != "")]
     work["observer_key"] = [
         _normalize_player_key(key_value, display_value)
-        for key_value, display_value in zip(work[schema.observer_key_column].tolist(), work[schema.observer_column].tolist())
+        for key_value, display_value in zip(work["observer_key"].tolist(), work["observer"].tolist())
     ]
     work["target_key"] = [
         _normalize_player_key(key_value, display_value)
-        for key_value, display_value in zip(work[schema.target_key_column].tolist(), work[schema.target_column].tolist())
+        for key_value, display_value in zip(work["target_key"].tolist(), work["target"].tolist())
     ]
-    work["is_visible"] = work[schema.is_visible_column].map(_coerce_bool)
-    work["seconds"] = _seconds_series(work, schema=schema, inferred_rounds=inferred_rounds, tickrate=tickrate)
-    if schema.observer_team_column is not None:
-        work["observer_team"] = pd.to_numeric(work[schema.observer_team_column], errors="coerce")
-    else:
-        work["observer_team"] = pd.Series([pd.NA] * len(work), index=work.index)
-    if schema.target_team_column is not None:
-        work["target_team"] = pd.to_numeric(work[schema.target_team_column], errors="coerce")
-    else:
-        work["target_team"] = pd.Series([pd.NA] * len(work), index=work.index)
-    work = work.dropna(subset=["round_id", "tick"])
-    work = work[(work["observer"] != "") & (work["target"] != "")]
-    work = work[(work["observer_key"] != "") & (work["target_key"] != "")]
+    missing_start = work["start_seconds"].isna()
+    work.loc[missing_start, "start_seconds"] = [
+        _derived_seconds(int(round_id), int(start_tick), start_ticks=start_ticks, tickrate=tickrate)
+        for round_id, start_tick in zip(work.loc[missing_start, "round_id"], work.loc[missing_start, "start_tick"])
+    ]
+    missing_end = work["end_seconds"].isna()
+    work.loc[missing_end, "end_seconds"] = [
+        _derived_seconds(int(round_id), int(end_tick), start_ticks=start_ticks, tickrate=tickrate)
+        for round_id, end_tick in zip(work.loc[missing_end, "round_id"], work.loc[missing_end, "end_tick"])
+    ]
     return work.loc[
         :,
-        ["round_id", "tick", "observer", "target", "observer_key", "target_key", "is_visible", "seconds", "observer_team", "target_team"],
+        [
+            "round_id",
+            "observer",
+            "target",
+            "observer_key",
+            "target_key",
+            "start_tick",
+            "end_tick",
+            "start_seconds",
+            "end_seconds",
+            "is_visible",
+            "state",
+        ],
     ]
-
-
-def _filter_enemy_pairs(decoded_rows: pd.DataFrame) -> pd.DataFrame:
-    if decoded_rows.empty:
-        return decoded_rows
-    return decoded_rows[
-        decoded_rows["observer_team"].isna()
-        | decoded_rows["target_team"].isna()
-        | (decoded_rows["observer_team"] != decoded_rows["target_team"])
-    ].copy()
 
 
 def format_info_event_line(event: InfoEvent) -> str:
@@ -388,64 +376,42 @@ def _make_info_event(
 def build_visibility_spotted_events(decoded_rows: pd.DataFrame) -> list[InfoEvent]:
     if decoded_rows.empty:
         return []
-    work = _filter_enemy_pairs(decoded_rows)
+    work = decoded_rows.copy()
+    work["visible_now"] = (
+        work["state"].map(_coerce_text).str.upper().eq("VISIBLE")
+        | work["is_visible"].map(_coerce_bool)
+    )
+    work = work[work["visible_now"]].copy()
     if work.empty:
         return []
-    if "observer_key" not in work.columns:
-        work = work.copy()
-        work["observer_key"] = work["observer"].map(_coerce_text)
-    if "target_key" not in work.columns:
-        work = work.copy()
-        work["target_key"] = work["target"].map(_coerce_text)
-    work = work.sort_values(["round_id", "observer_key", "target_key", "tick"]).reset_index(drop=True)
-
+    work = work.sort_values(["round_id", "observer_key", "target_key", "start_tick"]).reset_index(drop=True)
     events: list[InfoEvent] = []
-    pair_state: dict[tuple[int, str, str], dict[str, object]] = {}
+    last_visible_window: dict[tuple[int, str, str], float] = {}
     for row in work.to_dict("records"):
         round_id = int(row["round_id"])
-        tick = int(row["tick"])
         observer = str(row["observer"])
         target = str(row["target"])
-        observer_key = str(row["observer_key"])
-        target_key = str(row["target_key"])
-        is_visible = bool(row["is_visible"])
-        seconds = float(row["seconds"])
+        observer_key = _normalize_player_key(row.get("observer_key"), observer)
+        target_key = _normalize_player_key(row.get("target_key"), target)
+        start_tick = int(row["start_tick"])
+        start_seconds = float(row["start_seconds"])
+        end_seconds = float(row["end_seconds"])
         key = (round_id, observer_key, target_key)
-        state = pair_state.setdefault(
-            key,
-            {
-                "has_visible_before": False,
-                "currently_visible": False,
-                "last_visible_seconds": None,
-            },
-        )
-        if not is_visible:
-            state["currently_visible"] = False
-            continue
-        should_emit = False
-        if not bool(state["has_visible_before"]):
-            should_emit = True
-        elif bool(state["currently_visible"]):
-            should_emit = False
-        else:
-            last_visible_seconds = state["last_visible_seconds"]
-            gap_seconds = float("inf") if last_visible_seconds is None else (seconds - float(last_visible_seconds))
-            should_emit = gap_seconds >= VISIBILITY_REDISCOVERY_GAP_SECONDS
+        previous_end_seconds = last_visible_window.get(key)
+        should_emit = previous_end_seconds is None or (start_seconds - previous_end_seconds) >= VISIBILITY_REDISCOVERY_GAP_SECONDS
         if should_emit:
             events.append(
                 _make_info_event(
                     round_id=round_id,
-                    tick=tick,
-                    seconds=seconds,
+                    tick=start_tick,
+                    seconds=start_seconds,
                     observer=observer,
                     target=target,
                     observer_key=observer_key,
                     target_key=target_key,
                 )
             )
-        state["has_visible_before"] = True
-        state["currently_visible"] = True
-        state["last_visible_seconds"] = seconds
+        last_visible_window[key] = end_seconds
     return sorted(events, key=lambda event: (int(event.round_id), int(event.tick), str(event.observer), str(event.target)))
 
 
@@ -477,18 +443,17 @@ def load_info_events_for_dataset(
             rows_after=0,
             events_count=0,
             selected_columns=None,
-            extra_note="artifact_or_schema_unavailable",
+            extra_note="artifact_missing",
         )
         return []
     build_started_at = time.perf_counter()
     _profile_info_events_stage(
-        "info_events.build_spotted.start",
+        "viewer.info_events.build_from_intervals.start",
         round_id=round_id,
         rows_before=len(visibility_table),
-        selected_columns=schema.required_columns,
-        extra_note="event_scope=all_rounds" if round_id is None else f"event_scope=round_{int(round_id)}",
+        selected_columns=schema.projected_columns,
     )
-    decoded_rows = _decode_visibility_rows(
+    decoded_rows = _decode_visibility_intervals(
         visibility_table,
         schema=schema,
         inferred_rounds=inferred_rounds,
@@ -496,23 +461,13 @@ def load_info_events_for_dataset(
     )
     unformatted_events = build_visibility_spotted_events(decoded_rows)
     _profile_info_events_stage(
-        "info_events.build_spotted.end",
+        "viewer.info_events.build_from_intervals.end",
         started_at=build_started_at,
         round_id=round_id,
         rows_before=len(visibility_table),
         rows_after=len(decoded_rows),
         events_count=len(unformatted_events),
-        selected_columns=schema.required_columns,
-        extra_note="event_scope=all_rounds" if round_id is None else f"event_scope=round_{int(round_id)}",
-    )
-
-    format_started_at = time.perf_counter()
-    _profile_info_events_stage(
-        "info_events.format_lines.start",
-        round_id=round_id,
-        rows_before=len(unformatted_events),
-        events_count=len(unformatted_events),
-        selected_columns=("seconds", "observer", "target", "message"),
+        selected_columns=schema.projected_columns,
     )
     formatted_events = [
         InfoEvent(
@@ -529,23 +484,13 @@ def load_info_events_for_dataset(
         for event in unformatted_events
     ]
     _profile_info_events_stage(
-        "info_events.format_lines.end",
-        started_at=format_started_at,
-        round_id=round_id,
-        rows_before=len(unformatted_events),
-        rows_after=len(formatted_events),
-        events_count=len(formatted_events),
-        selected_columns=("seconds", "observer", "target", "message"),
-    )
-    _profile_info_events_stage(
         "info_events.load.end",
         started_at=load_started_at,
         round_id=round_id,
         rows_before=len(visibility_table),
         rows_after=len(decoded_rows),
         events_count=len(formatted_events),
-        selected_columns=schema.required_columns,
-        extra_note="round_scope=all" if round_id is None else f"round_scope=single target_round_id={int(round_id)}",
+        selected_columns=schema.projected_columns,
     )
     return formatted_events
 

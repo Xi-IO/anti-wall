@@ -142,7 +142,7 @@ def build_assets_parser() -> argparse.ArgumentParser:
 def build_visibility_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="wall visibility",
-        description="Export visibility judgements or summaries for a parsed dataset.",
+        description="Export interval visibility artifacts or summaries for a parsed dataset.",
     )
     parser.add_argument("dataset", type=Path, help="Directory containing parsed output tables")
     parser.add_argument(
@@ -159,10 +159,15 @@ def build_visibility_parser() -> argparse.ArgumentParser:
     parser.add_argument("--only-visible", action="store_true", help="Keep only rows where is_visible is true")
     parser.add_argument("--summary", action="store_true", help="Export one row per observer per tick instead of pair rows")
     parser.add_argument(
+        "--keep-raw-visibility",
+        action="store_true",
+        help="Also write visibility_raw.parquet for debug/profile inspection.",
+    )
+    parser.add_argument(
         "--output-kind",
-        choices=["pair", "summary", "both"],
+        choices=["interval", "summary", "raw-pair", "both", "pair"],
         default=None,
-        help="Output kind. Defaults to pair unless --summary is set.",
+        help="Output kind. Defaults to interval unless --summary is set. 'pair' is a compatibility alias for 'raw-pair'.",
     )
     parser.add_argument(
         "--include-freeze-time",
@@ -257,13 +262,13 @@ def ensure_default_visibility_artifact(
         dataset=loaded if len(round_ids) == 1 else None,
         jobs=4,
         combine_rounds=True,
-        output_kind="pair",
+        output_kind="interval",
         progress_callback=progress_callback,
     )
-    if result.output_paths is None or "pair" not in result.output_paths:
-        raise RuntimeError(f"Visibility export did not produce pair output for {dataset_dir}")
-    print_status(f"Visibility pair table written to: {result.output_paths['pair']}")
-    return result.output_paths["pair"]
+    if result.output_paths is None or "interval" not in result.output_paths:
+        raise RuntimeError(f"Visibility export did not produce interval output for {dataset_dir}")
+    print_status(f"Visibility interval table written to: {result.output_paths['interval']}")
+    return result.output_paths["interval"]
 
 
 def handle_view(dataset: Path, args: argparse.Namespace) -> int:
@@ -459,6 +464,7 @@ def handle_visibility(args: argparse.Namespace) -> int:
         jobs=args.jobs,
         combine_rounds=combine_rounds,
         progress_callback=progress_callback,
+        keep_raw_visibility=args.keep_raw_visibility,
     )
     if combine_rounds and batch_result.output_paths:
         for kind, path in batch_result.output_paths.items():

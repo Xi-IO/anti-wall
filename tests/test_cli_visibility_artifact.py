@@ -16,6 +16,7 @@ import pandas as pd
 
 import wall.visibility.export as visibility_export
 from wall.cli import ensure_default_visibility_artifact, handle_playback
+from wall.analysis.visibility_export import run_visibility_exports
 
 
 TEST_TMP_ROOT = Path("F:/wall/tmp_test_cli_visibility_artifact")
@@ -302,15 +303,33 @@ class CliVisibilityArtifactTests(unittest.TestCase):
         self.assertEqual(
             exported.columns.tolist(),
             [
-                "tick",
                 "round_id",
                 "observer",
                 "target",
-                "distance",
-                "relative_yaw_deg",
+                "observer_key",
+                "target_key",
+                "start_tick",
+                "end_tick",
+                "start_seconds",
+                "end_seconds",
+                "duration_seconds",
+                "sample_count",
                 "in_fov",
                 "has_los",
                 "is_visible",
+                "state",
+                "distance_start",
+                "distance_end",
+                "distance_min",
+                "distance_max",
+                "distance_mean",
+                "relative_yaw_start",
+                "relative_yaw_end",
+                "relative_yaw_min",
+                "relative_yaw_max",
+                "relative_yaw_abs_min",
+                "relative_yaw_abs_mean",
+                "relative_yaw_abs_max",
             ],
         )
 
@@ -326,7 +345,7 @@ class CliVisibilityArtifactTests(unittest.TestCase):
         rendered = output.getvalue()
         self.assertIn("Visibility Progress", rendered)
         self.assertIn("1/1", rendered)
-        self.assertIn("Visibility pair table written to:", rendered)
+        self.assertIn("Visibility interval table written to:", rendered)
 
     def test_automatic_visibility_generation_is_quiet_by_default(self) -> None:
         dataset_dir = make_test_dir()
@@ -337,6 +356,33 @@ class CliVisibilityArtifactTests(unittest.TestCase):
             ensure_default_visibility_artifact(dataset_dir, force=True)
 
         self.assertEqual(output.getvalue(), "")
+
+    def test_default_visibility_export_does_not_write_raw_pair_table(self) -> None:
+        dataset_dir = make_test_dir()
+        _write_dataset(dataset_dir)
+
+        ensure_default_visibility_artifact(dataset_dir, force=True)
+
+        self.assertFalse((dataset_dir / "visibility_raw.parquet").exists())
+
+    def test_keep_raw_visibility_writes_extra_raw_pair_table(self) -> None:
+        dataset_dir = make_test_dir()
+        _write_dataset(dataset_dir)
+
+        result = run_visibility_exports(
+            dataset_dir,
+            round_ids=[1],
+            output_kind="interval",
+            table_format="parquet",
+            jobs=1,
+            combine_rounds=True,
+            keep_raw_visibility=True,
+        )
+
+        assert result.output_paths is not None
+        self.assertIn("interval", result.output_paths)
+        self.assertIn("raw-pair", result.output_paths)
+        self.assertTrue(result.output_paths["raw-pair"].exists())
 
 
 if __name__ == "__main__":

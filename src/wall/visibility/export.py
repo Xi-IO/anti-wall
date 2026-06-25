@@ -3,6 +3,8 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 import io
+import json
+import math
 from pathlib import Path
 import time
 from typing import Callable
@@ -22,6 +24,8 @@ class VisibilityResultRow:
     round_id: int
     observer: str
     target: str
+    observer_key: str
+    target_key: str
     observer_team: int | None
     target_team: int | None
     observer_x: float | None
@@ -97,6 +101,7 @@ class _VisibilityWorkerTask:
     table_format: str | None
     profile_visibility: bool
     combine_rounds: bool
+    keep_raw_visibility: bool
 
 
 @dataclass(frozen=True)
@@ -105,6 +110,90 @@ class _VisibilityWorkerResult:
     assigned_round_ids: tuple[int, ...]
     round_results: tuple[VisibilityBatchRoundResult, ...]
     checker_builds: int
+
+
+VISIBILITY_ARTIFACT_VERSION = "2"
+VISIBILITY_SCHEMA_INTERVAL = "interval"
+VISIBILITY_STATE_OUT_OF_FOV = "OUT_OF_FOV"
+VISIBILITY_STATE_IN_FOV_BLOCKED = "IN_FOV_BLOCKED"
+VISIBILITY_STATE_VISIBLE = "VISIBLE"
+VISIBILITY_STATE_UNKNOWN = "UNKNOWN"
+
+
+def _resolve_output_kind(summary: bool, output_kind: str | None) -> str:
+    if output_kind is None:
+        return "summary" if summary else "interval"
+    if output_kind == "pair":
+        return "raw-pair"
+    if output_kind == "both":
+        return "both"
+    return output_kind
+
+
+def _state_for_row(row: VisibilityResultRow) -> str:
+    if not row.in_fov:
+        return VISIBILITY_STATE_OUT_OF_FOV
+    if row.has_los is False:
+        return VISIBILITY_STATE_IN_FOV_BLOCKED
+    if row.has_los is True and row.is_visible:
+        return VISIBILITY_STATE_VISIBLE
+    return VISIBILITY_STATE_UNKNOWN
+
+
+def _clean_key(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if not text or text.lower() == "nan" else text
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _bool_signature(value: bool | None) -> object:
+    return None if value is None else bool(value)
+
+
+def _metric_stats(values: list[float | None]) -> tuple[float | None, float | None, float | None, float | None, float | None]:
+    clean = [value for value in values if value is not None]
+    if not clean:
+        return None, None, None, None, None
+    return clean[0], clean[-1], min(clean), max(clean), sum(clean) / len(clean)
+
+
+def _abs_metric_stats(values: list[float | None]) -> tuple[float | None, float | None, float | None]:
+    clean = [abs(value) for value in values if value is not None]
+    if not clean:
+        return None, None, None
+    return min(clean), sum(clean) / len(clean), max(clean)
+
+
+def _round_tick_seconds(round_data: RoundData) -> dict[int, float]:
+    if "inferred_round_seconds" not in round_data.round_ticks.columns:
+        return {int(tick): (int(tick) - int(round_data.round_start_tick)) / 64.0 for tick in round_data.frame_ticks}
+    work = round_data.round_ticks.loc[:, ["tick", "inferred_round_seconds"]].drop_duplicates("tick", keep="first")
+    ticks = pd.to_numeric(work["tick"], errors="coerce")
+    seconds = pd.to_numeric(work["inferred_round_seconds"], errors="coerce")
+    return {
+        int(tick): float(second)
+        for tick, second in zip(ticks.tolist(), seconds.tolist())
+        if pd.notna(tick) and pd.notna(second)
+    }
+
+
+def _ensure_seconds_for_rows(result_set: VisibilityResultSet, round_data: RoundData) -> dict[int, float]:
+    tick_to_seconds = _round_tick_seconds(round_data)
+    fallback_tickrate = max(1.0, float(getattr(round_data, "tickrate", 64.0)))
+    for row in result_set.rows:
+        tick_to_seconds.setdefault(int(row.tick), (int(row.tick) - int(round_data.round_start_tick)) / fallback_tickrate)
+    return tick_to_seconds
 
 
 class LosOverlapResult:
@@ -233,6 +322,8 @@ def build_visibility_result_set(
                         round_id=int(round_data.round_id),
                         observer=judgement.observer,
                         target=judgement.target,
+                        observer_key="" if observer_frame is None else _clean_key(observer_frame.steamid) or _clean_key(observer_frame.name),
+                        target_key="" if target_frame is None else _clean_key(target_frame.steamid) or _clean_key(target_frame.name),
                         observer_team=None if observer_frame is None else observer_frame.team_num,
                         target_team=None if target_frame is None else target_frame.team_num,
                         observer_x=None if judgement.observer_position is None else judgement.observer_position[0],
@@ -260,11 +351,120 @@ def _result_rows_to_pair_table(result_set: VisibilityResultSet, *, only_visible:
         "round_id",
         "observer",
         "target",
+        "observer_key",
+        "target_key",
         "distance",
         "relative_yaw_deg",
         "in_fov",
         "has_los",
         "is_visible",
+    ]
+    if table.empty:
+        return pd.DataFrame(columns=expected_columns)
+    return table[expected_columns]
+
+
+def _result_rows_to_interval_table(
+    result_set: VisibilityResultSet,
+    *,
+    tick_to_seconds: dict[int, float],
+    only_visible: bool,
+) -> pd.DataFrame:
+    rows = sorted(
+        (row for row in result_set.rows if not only_visible or row.is_visible),
+        key=lambda row: (int(row.round_id), str(row.observer), str(row.target), int(row.tick)),
+    )
+    interval_rows: list[dict[str, object]] = []
+    current_rows: list[VisibilityResultRow] = []
+    current_signature: tuple[object, ...] | None = None
+    current_group: tuple[int, str, str] | None = None
+
+    def _flush() -> None:
+        if not current_rows:
+            return
+        first = current_rows[0]
+        last = current_rows[-1]
+        distances = [_float_or_none(row.distance) for row in current_rows]
+        yaws = [_float_or_none(row.relative_yaw_deg) for row in current_rows]
+        distance_start, distance_end, distance_min, distance_max, distance_mean = _metric_stats(distances)
+        yaw_start, yaw_end, yaw_min, yaw_max, _ = _metric_stats(yaws)
+        yaw_abs_min, yaw_abs_mean, yaw_abs_max = _abs_metric_stats(yaws)
+        start_tick = int(first.tick)
+        end_tick = int(last.tick)
+        start_seconds = float(tick_to_seconds.get(start_tick, 0.0))
+        end_seconds = float(tick_to_seconds.get(end_tick, start_seconds))
+        interval_rows.append(
+            {
+                "round_id": int(first.round_id),
+                "observer": first.observer,
+                "target": first.target,
+                "observer_key": first.observer_key,
+                "target_key": first.target_key,
+                "start_tick": start_tick,
+                "end_tick": end_tick,
+                "start_seconds": start_seconds,
+                "end_seconds": end_seconds,
+                "duration_seconds": end_seconds - start_seconds,
+                "sample_count": len(current_rows),
+                "in_fov": bool(first.in_fov),
+                "has_los": first.has_los,
+                "is_visible": bool(first.is_visible),
+                "state": _state_for_row(first),
+                "distance_start": distance_start,
+                "distance_end": distance_end,
+                "distance_min": distance_min,
+                "distance_max": distance_max,
+                "distance_mean": distance_mean,
+                "relative_yaw_start": yaw_start,
+                "relative_yaw_end": yaw_end,
+                "relative_yaw_min": yaw_min,
+                "relative_yaw_max": yaw_max,
+                "relative_yaw_abs_min": yaw_abs_min,
+                "relative_yaw_abs_mean": yaw_abs_mean,
+                "relative_yaw_abs_max": yaw_abs_max,
+            }
+        )
+
+    for row in rows:
+        group = (int(row.round_id), str(row.observer), str(row.target))
+        signature = (bool(row.in_fov), _bool_signature(row.has_los), bool(row.is_visible))
+        if current_group != group or current_signature != signature:
+            _flush()
+            current_rows = [row]
+            current_group = group
+            current_signature = signature
+            continue
+        current_rows.append(row)
+    _flush()
+    table = pd.DataFrame(interval_rows)
+    expected_columns = [
+        "round_id",
+        "observer",
+        "target",
+        "observer_key",
+        "target_key",
+        "start_tick",
+        "end_tick",
+        "start_seconds",
+        "end_seconds",
+        "duration_seconds",
+        "sample_count",
+        "in_fov",
+        "has_los",
+        "is_visible",
+        "state",
+        "distance_start",
+        "distance_end",
+        "distance_min",
+        "distance_max",
+        "distance_mean",
+        "relative_yaw_start",
+        "relative_yaw_end",
+        "relative_yaw_min",
+        "relative_yaw_max",
+        "relative_yaw_abs_min",
+        "relative_yaw_abs_mean",
+        "relative_yaw_abs_max",
     ]
     if table.empty:
         return pd.DataFrame(columns=expected_columns)
@@ -332,9 +532,13 @@ def build_visibility_table(
         tick=tick,
         tick_step=tick_step,
         skip_freeze_time=skip_freeze_time,
-        output_kind="pair",
+        output_kind="interval",
     )
-    return _result_rows_to_pair_table(result_set, only_visible=only_visible)
+    return _result_rows_to_interval_table(
+        result_set,
+        tick_to_seconds=_ensure_seconds_for_rows(result_set, round_data),
+        only_visible=only_visible,
+    )
 
 
 def build_visibility_summary_table(
@@ -369,8 +573,26 @@ def _default_output_path(
     skip_freeze_time: bool,
     only_visible: bool,
 ) -> Path:
-    stem = "visibility_summary" if output_kind == "summary" else "visibility"
-    stem += "_all_rounds" if round_id is None else f"_round_{round_id:02d}"
+    is_canonical_interval = (
+        output_kind == "interval"
+        and round_id is None
+        and observer is None
+        and tick is None
+        and not only_visible
+    )
+    if is_canonical_interval:
+        stem = "visibility"
+    elif output_kind == "summary":
+        stem = "visibility_summary"
+        stem += "_all_rounds" if round_id is None else f"_round_{round_id:02d}"
+    elif output_kind == "raw-pair":
+        stem = "visibility_raw" if round_id is None else f"visibility_raw_round_{round_id:02d}"
+    else:
+        stem = "visibility"
+        stem += "_all_rounds" if round_id is None else f"_round_{round_id:02d}"
+    if is_canonical_interval:
+        suffix = ".parquet" if output_format == "parquet" else ".csv"
+        return data_dir / f"{stem}{suffix}"
     if tick is not None:
         stem += f"_tick_{int(tick)}"
     elif tick_step > 1:
@@ -420,28 +642,88 @@ def _write_table_to_path(
             table.to_csv(output_path, index=False)
 
 
+def _write_visibility_metadata(
+    data_dir: Path,
+    *,
+    dataset: MatchDataset | None,
+    round_ids: list[int],
+    tick_step: int,
+    skip_freeze_time: bool,
+    keep_raw_visibility: bool,
+    output_paths: dict[str, Path],
+    profile: VisibilityProfile | None,
+) -> None:
+    started_at = time.perf_counter()
+    metadata_path = data_dir / "metadata.json"
+    metadata: dict[str, object] = {}
+    if metadata_path.exists():
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    derived = metadata.get("derived", {})
+    if not isinstance(derived, dict):
+        derived = {}
+        metadata["derived"] = derived
+    visibility_section = metadata.get("visibility", {})
+    if not isinstance(visibility_section, dict):
+        visibility_section = {}
+    visibility_section.update(
+        {
+            "artifact_version": VISIBILITY_ARTIFACT_VERSION,
+            "schema_kind": VISIBILITY_SCHEMA_INTERVAL,
+            "tick_step": int(tick_step),
+            "pair_scope": "enemy_only",
+            "time_scope": "post_freeze_only" if skip_freeze_time else "include_freeze_time",
+            "map_name": (dataset.map_name if dataset is not None else None) or derived.get("map_name"),
+            "fov_deg": 90.0,
+            "generated_at": pd.Timestamp.now("UTC").isoformat(),
+            "raw_pair_saved": bool(keep_raw_visibility or "raw-pair" in output_paths),
+            "round_ids": [int(round_id) for round_id in round_ids],
+            "artifact_path": str(output_paths.get("interval", data_dir / "visibility.parquet")),
+            "raw_pair_path": None if "raw-pair" not in output_paths else str(output_paths["raw-pair"]),
+        }
+    )
+    metadata["visibility"] = visibility_section
+    metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=True), encoding="utf-8")
+    if profile is not None:
+        profile.metadata_writer_seconds += time.perf_counter() - started_at
+
+
 def _build_visibility_output_tables(
     result_set: VisibilityResultSet,
     *,
+    round_data: RoundData,
     only_visible: bool,
     resolved_output_kind: str,
     profile: VisibilityProfile | None,
+    keep_raw_visibility: bool,
 ) -> dict[str, pd.DataFrame]:
-    kinds = ("summary", "pair") if resolved_output_kind == "both" else (resolved_output_kind,)
+    if resolved_output_kind == "both":
+        kinds = ["interval", "summary"]
+    else:
+        kinds = [resolved_output_kind]
+    if keep_raw_visibility and "raw-pair" not in kinds:
+        kinds.append("raw-pair")
     tables: dict[str, pd.DataFrame] = {}
+    tick_to_seconds = _ensure_seconds_for_rows(result_set, round_data)
     for kind in kinds:
         writer_started_at = time.perf_counter()
-        table = (
-            _result_rows_to_summary_table(result_set, only_visible=only_visible)
-            if kind == "summary"
-            else _result_rows_to_pair_table(result_set, only_visible=only_visible)
-        )
+        if kind == "summary":
+            table = _result_rows_to_summary_table(result_set, only_visible=only_visible)
+        elif kind == "raw-pair":
+            table = _result_rows_to_pair_table(result_set, only_visible=only_visible)
+        else:
+            table = _result_rows_to_interval_table(
+                result_set,
+                tick_to_seconds=tick_to_seconds,
+                only_visible=only_visible,
+            )
         if profile is not None:
             elapsed = time.perf_counter() - writer_started_at
             if kind == "summary":
                 profile.summary_writer_seconds += elapsed
-            else:
+            elif kind == "raw-pair":
                 profile.pair_writer_seconds += elapsed
+            else:
+                profile.interval_compress_seconds += elapsed
         tables[kind] = table
     return tables
 
@@ -464,16 +746,18 @@ def run_visibility_export(
     dataset: MatchDataset | None = None,
     write_output: bool = True,
     map_visibility_context: MapVisibilityContext | None = None,
+    keep_raw_visibility: bool = False,
 ) -> VisibilityExportResult:
-    resolved_output_kind = output_kind or ("summary" if summary else "pair")
+    resolved_output_kind = _resolve_output_kind(summary, output_kind)
     profile = VisibilityProfile(output_kind=resolved_output_kind) if profile_visibility else None
     pipeline_started_at = time.perf_counter()
+    loaded_dataset = MatchDataset.from_data_dir(data_dir) if dataset is None else dataset
     round_data = _coerce_round_data(
         data_dir,
         round_id=round_id,
         tickrate=tickrate,
         visibility_profile=profile,
-        dataset=dataset,
+        dataset=loaded_dataset,
         map_visibility_context=map_visibility_context,
     )
     result_set = build_visibility_result_set(
@@ -487,13 +771,15 @@ def run_visibility_export(
     output_format = normalize_table_format(table_format or DEFAULT_TABLE_FORMAT)
     tables = _build_visibility_output_tables(
         result_set,
+        round_data=round_data,
         only_visible=only_visible,
         resolved_output_kind=resolved_output_kind,
         profile=profile,
+        keep_raw_visibility=keep_raw_visibility,
     )
     output_paths: dict[str, Path] = {}
-    if resolved_output_kind == "both" and output_path is not None:
-        raise ValueError("Explicit --output is not supported when output kind is 'both'.")
+    if output_path is not None and len(tables) > 1:
+        raise ValueError("Explicit --output is only supported when exactly one visibility table is being written.")
     if write_output:
         for kind, table in tables.items():
             target_path = Path(output_path) if output_path is not None else _default_output_path(
@@ -507,8 +793,26 @@ def run_visibility_export(
                 skip_freeze_time=skip_freeze_time,
                 only_visible=only_visible,
             )
+            write_started_at = time.perf_counter()
             _write_table_to_path(table, target_path, output_format=output_format, profile=profile)
+            if profile is not None:
+                elapsed = time.perf_counter() - write_started_at
+                if kind == "interval":
+                    profile.interval_writer_seconds += elapsed
+                elif kind == "raw-pair":
+                    profile.raw_pair_writer_seconds += elapsed
             output_paths[kind] = target_path
+        if "interval" in output_paths:
+            _write_visibility_metadata(
+                data_dir,
+                dataset=loaded_dataset,
+                round_ids=[int(round_id)],
+                tick_step=tick_step,
+                skip_freeze_time=skip_freeze_time,
+                keep_raw_visibility=keep_raw_visibility,
+                output_paths=output_paths,
+                profile=profile,
+            )
     if profile is not None:
         profile.total_visibility_pipeline_seconds = time.perf_counter() - pipeline_started_at
     return VisibilityExportResult(output_paths=output_paths, profile=profile, tables=tables)
@@ -556,6 +860,7 @@ def _run_visibility_worker_task(task: _VisibilityWorkerTask) -> _VisibilityWorke
             dataset=dataset,
             write_output=not task.combine_rounds,
             map_visibility_context=context,
+            keep_raw_visibility=task.keep_raw_visibility,
         )
         if result.profile is not None:
             checker_builds += result.profile.checker_build_count
@@ -594,13 +899,14 @@ def run_visibility_exports(
     jobs: int = 4,
     combine_rounds: bool = True,
     progress_callback: Callable[[int, int, int], None] | None = None,
+    keep_raw_visibility: bool = False,
 ) -> VisibilityBatchExportResult:
     resolved_jobs = max(1, int(jobs))
     total_rounds = len(round_ids)
     if resolved_jobs == 1:
         round_results: list[VisibilityBatchRoundResult] = []
         aggregate_profile = (
-            VisibilityProfile(output_kind=output_kind or ("summary" if summary else "pair"))
+            VisibilityProfile(output_kind=_resolve_output_kind(summary, output_kind))
             if profile_visibility
             else None
         )
@@ -625,6 +931,7 @@ def run_visibility_exports(
                 dataset=loaded_dataset,
                 write_output=not combine_rounds,
                 map_visibility_context=context,
+                keep_raw_visibility=keep_raw_visibility,
             )
             round_results.append(
                 VisibilityBatchRoundResult(
@@ -659,13 +966,31 @@ def run_visibility_exports(
                     skip_freeze_time=skip_freeze_time,
                     only_visible=only_visible,
                 )
+                write_started_at = time.perf_counter()
                 _write_table_to_path(
                     combined_table,
                     target_path,
                     output_format=output_format,
                     profile=aggregate_profile,
                 )
+                if aggregate_profile is not None:
+                    elapsed = time.perf_counter() - write_started_at
+                    if kind == "interval":
+                        aggregate_profile.interval_writer_seconds += elapsed
+                    elif kind == "raw-pair":
+                        aggregate_profile.raw_pair_writer_seconds += elapsed
                 combined_output_paths[kind] = target_path
+            if "interval" in combined_output_paths:
+                _write_visibility_metadata(
+                    data_dir,
+                    dataset=loaded_dataset,
+                    round_ids=round_ids,
+                    tick_step=tick_step,
+                    skip_freeze_time=skip_freeze_time,
+                    keep_raw_visibility=keep_raw_visibility,
+                    output_paths=combined_output_paths,
+                    profile=aggregate_profile,
+                )
         return VisibilityBatchExportResult(
             round_results=tuple(round_results),
             aggregate_profile=aggregate_profile,
@@ -675,7 +1000,7 @@ def run_visibility_exports(
     chunks = _chunk_round_ids(round_ids, resolved_jobs)
     worker_count = len(chunks)
     aggregate_profile = (
-        VisibilityProfile(output_kind=output_kind or ("summary" if summary else "pair"))
+        VisibilityProfile(output_kind=_resolve_output_kind(summary, output_kind))
         if profile_visibility
         else None
     )
@@ -700,6 +1025,7 @@ def run_visibility_exports(
             table_format=table_format,
             profile_visibility=profile_visibility,
             combine_rounds=combine_rounds,
+            keep_raw_visibility=keep_raw_visibility,
         )
         for worker_index, chunk in enumerate(chunks)
     ]
@@ -750,13 +1076,31 @@ def run_visibility_exports(
                 skip_freeze_time=skip_freeze_time,
                 only_visible=only_visible,
             )
+            write_started_at = time.perf_counter()
             _write_table_to_path(
                 combined_table,
                 target_path,
                 output_format=output_format,
                 profile=aggregate_profile,
             )
+            if aggregate_profile is not None:
+                elapsed = time.perf_counter() - write_started_at
+                if kind == "interval":
+                    aggregate_profile.interval_writer_seconds += elapsed
+                elif kind == "raw-pair":
+                    aggregate_profile.raw_pair_writer_seconds += elapsed
             combined_output_paths[kind] = target_path
+        if "interval" in combined_output_paths:
+            _write_visibility_metadata(
+                data_dir,
+                dataset=dataset or MatchDataset.from_data_dir(data_dir),
+                round_ids=round_ids,
+                tick_step=tick_step,
+                skip_freeze_time=skip_freeze_time,
+                keep_raw_visibility=keep_raw_visibility,
+                output_paths=combined_output_paths,
+                profile=aggregate_profile,
+            )
     return VisibilityBatchExportResult(
         round_results=tuple(sorted(round_results, key=lambda result: result.round_id)),
         aggregate_profile=aggregate_profile,
