@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pygame
 
+from wall.domain.player import RoundPlayers
 from wall.domain.sound import SoundPresentationConfig, SoundTimeline
 
 
@@ -64,6 +65,7 @@ def draw_sound_events(
     height: int,
     font: pygame.font.Font,
     sound_timeline: SoundTimeline,
+    round_players: RoundPlayers | None,
     world_to_px,
     world_dist_to_px,
     presentation: SoundPresentationConfig,
@@ -76,6 +78,7 @@ def draw_sound_events(
         return
     active = sound_timeline.present_events_at(
         frame_tick,
+        round_players=round_players,
         world_to_px=world_to_px,
         world_dist_to_px=world_dist_to_px,
         viewport_width=width,

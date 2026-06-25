@@ -538,3 +538,4 @@ Evidence Episode
 
 * `docs/architecture.md`
 * `docs/viewer-decoupling-checklist.md`
+* `docs/sound-feed-governance.md`

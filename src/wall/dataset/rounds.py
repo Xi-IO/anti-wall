@@ -61,7 +61,10 @@ def load_round_data(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
         data_dir,
         "grenade_trajectory_segments",
     )
-    sound_events, sound_events_label = read_table_with_fallback(data_dir, "sound_events")
+    sound_effects, sound_effects_label = read_table_with_fallback(data_dir, "sound_effect")
+    if sound_effects.empty:
+        # Legacy dataset fallback during sound-effect migration.
+        sound_effects, sound_effects_label = read_table_with_fallback(data_dir, "sound_events")
     inferred_rounds, inferred_rounds_label = read_table_with_fallback(data_dir, "inferred_rounds", required=True)
     metadata_path = data_dir / "metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
@@ -107,10 +110,15 @@ def load_round_data(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
         require_column(grenade_trajectory_segments, "round_id", grenade_trajectory_segments_label)
         require_column(grenade_trajectory_segments, "start_tick", grenade_trajectory_segments_label)
         require_column(grenade_trajectory_segments, "end_tick", grenade_trajectory_segments_label)
-    if not sound_events.empty:
-        require_round_time_columns(sound_events, sound_events_label)
+    if not sound_effects.empty:
+        if "round_id" in sound_effects.columns:
+            require_column(sound_effects, "round_id", sound_effects_label)
+            require_column(sound_effects, "start_tick", sound_effects_label)
+            require_column(sound_effects, "end_tick", sound_effects_label)
+        else:
+            require_round_time_columns(sound_effects, sound_effects_label)
     require_column(inferred_rounds, "inferred_round_id", inferred_rounds_label)
-    return ticks, deaths, fires, hurts, hits, footsteps, smoke_detonates, flash_detonates, he_detonates, blinds, bomb_pickups, bomb_drops, bomb_begin_plants, bomb_plants, bomb_defuses, bomb_begin_defuses, bomb_abort_defuses, bomb_explodes, smoke_expires, inferno_starts, grenade_trajectory_segments, sound_events, inferred_rounds, metadata
+    return ticks, deaths, fires, hurts, hits, footsteps, smoke_detonates, flash_detonates, he_detonates, blinds, bomb_pickups, bomb_drops, bomb_begin_plants, bomb_plants, bomb_defuses, bomb_begin_defuses, bomb_abort_defuses, bomb_explodes, smoke_expires, inferno_starts, grenade_trajectory_segments, sound_effects, inferred_rounds, metadata
 
 
 @dataclass
@@ -171,7 +179,7 @@ def get_round_data(
     bomb_explodes: pd.DataFrame,
     smoke_expires: pd.DataFrame,
     inferno_starts: pd.DataFrame,
-    sound_events: pd.DataFrame,
+    sound_effects: pd.DataFrame,
     inferred_rounds: pd.DataFrame,
     round_id: int,
     tickrate: float = 64.0,
@@ -205,7 +213,11 @@ def get_round_data(
         if not grenade_segments_source.empty and "round_id" in grenade_segments_source.columns
         else pd.DataFrame()
     )
-    round_sound_events = _slice_round_table(sound_events, round_id) if not sound_events.empty else pd.DataFrame()
+    round_sound_effects = (
+        sound_effects[pd.to_numeric(sound_effects["round_id"], errors="coerce") == int(round_id)].copy()
+        if not sound_effects.empty and "round_id" in sound_effects.columns
+        else _slice_round_table(sound_effects, round_id) if not sound_effects.empty else pd.DataFrame()
+    )
     round_info = inferred_rounds[inferred_rounds["inferred_round_id"] == round_id].copy() if not inferred_rounds.empty else pd.DataFrame()
     if visibility_profile is not None:
         visibility_profile.round_lookup_seconds += time.perf_counter() - round_lookup_started_at
@@ -225,7 +237,7 @@ def get_round_data(
         round_grenade_trajectory_segments,
         ["grenade_id", "segment_index", "start_tick"],
     )
-    round_sound_events = _sort_if_needed(round_sound_events, ["tick", "sound_kind"])
+    round_sound_effects = _sort_if_needed(round_sound_effects, ["start_tick", "sound_class", "sound_action"])
     profile_log(
         "round_data.slice",
         started_at=round_lookup_started_at,
@@ -289,7 +301,7 @@ def get_round_data(
         tickrate=tickrate,
         round_players=round_players,
     )
-    sound_timeline = SoundTimeline(round_sound_events)
+    sound_timeline = SoundTimeline(round_sound_effects)
     visibility_timeline = VisibilityTimeline(
         round_players=round_players,
         fov_deg=90.0,

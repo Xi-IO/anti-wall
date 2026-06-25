@@ -748,6 +748,7 @@ class PygameRoundRenderer:
             height=self.height,
             font=self.small_font,
             sound_timeline=self.sound_timeline,
+            round_players=self.round_players,
             world_to_px=self.world_to_px,
             world_dist_to_px=self.world_dist_to_px,
             presentation=SOUND_PRESENTATION,

@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from wall.output import applied_output_mode, progress_enabled, print_status
+from wall.output import applied_output_mode, print_milestone, progress_enabled, print_status
 from wall.assets import (
     FEATURE_ARTIFACTS,
     AssetError,
@@ -240,6 +240,7 @@ def ensure_default_visibility_artifact(
         raise FileNotFoundError(f"Dataset directory not found or invalid: {dataset_dir}")
     output_path = dataset_dir / "visibility.parquet"
     if output_path.exists() and not force:
+        print_milestone(f"[visibility] Reusing existing artifact: {output_path}")
         return None
     map_name = resolve_dataset_map_name(dataset_dir)
     if map_name:
@@ -251,7 +252,8 @@ def ensure_default_visibility_artifact(
     round_ids = [int(round_id) for round_id in loaded.round_ids]
     if not round_ids:
         raise ValueError(f"No inferred rounds available for visibility export: {dataset_dir}")
-    progress_callback = _build_visibility_progress_callback(len(round_ids)) if progress_enabled() else None
+    print_milestone(f"[visibility] Building visibility for {len(round_ids)} rounds")
+    progress_callback = _build_visibility_progress_callback(len(round_ids))
     result = run_visibility_exports(
         dataset_dir,
         round_ids=round_ids,
@@ -267,6 +269,7 @@ def ensure_default_visibility_artifact(
     )
     if result.output_paths is None or "interval" not in result.output_paths:
         raise RuntimeError(f"Visibility export did not produce interval output for {dataset_dir}")
+    print_milestone(f"[visibility] Completed: {result.output_paths['interval']}")
     print_status(f"Visibility interval table written to: {result.output_paths['interval']}")
     return result.output_paths["interval"]
 
@@ -279,6 +282,7 @@ def handle_view(dataset: Path, args: argparse.Namespace) -> int:
         check_or_raise_for_feature("viewer", map_name=str(demo_map_name), prompt=True)
     from wall.viewer.cli import main as view_main
 
+    print_milestone(f"[viewer] Preparing pygame viewer for dataset: {dataset}")
     argv = [str(dataset)]
     if args.round_id is not None:
         argv.extend(["--round", str(args.round_id)])
@@ -331,7 +335,11 @@ def handle_playback(args: argparse.Namespace) -> int:
             dataset_dir = dataset_dir_for_demo(demo_path, args.output_dir)
             should_parse = args.renew or not looks_like_dataset_dir(dataset_dir)
             if should_parse:
+                print_milestone(f"[parse] Building dataset from demo: {demo_path.name}")
                 handle_parse(args, demo_path=demo_path, output_dir=args.output_dir)
+                print_milestone(f"[parse] Dataset ready: {dataset_dir}")
+            else:
+                print_milestone(f"[parse] Reusing existing dataset: {dataset_dir}")
             if not args.no_visibility:
                 ensure_default_visibility_artifact(
                     dataset_dir,
@@ -353,8 +361,12 @@ def handle_playback(args: argparse.Namespace) -> int:
                     raise FileNotFoundError(
                         f"Original demo referenced by metadata no longer exists: {demo_path}"
                     )
+                print_milestone(f"[parse] Rebuilding dataset from demo: {demo_path.name}")
                 handle_parse(args, demo_path=demo_path, output_dir=dataset_dir.parent)
                 rebuilt_dataset = True
+                print_milestone(f"[parse] Dataset ready: {dataset_dir}")
+            else:
+                print_milestone(f"[parse] Using dataset directory: {dataset_dir}")
             if not args.no_visibility:
                 ensure_default_visibility_artifact(
                     dataset_dir,

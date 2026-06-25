@@ -32,6 +32,10 @@ def print_status(message: str = "") -> None:
     print(message, flush=True)
 
 
+def print_milestone(message: str = "") -> None:
+    print(message, flush=True)
+
+
 @contextmanager
 def applied_output_mode(*, verbose: bool = False, profile: bool = False) -> Iterator[None]:
     previous_verbose = os.environ.get("WALL_VERBOSE")

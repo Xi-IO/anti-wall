@@ -182,7 +182,7 @@ class VisibilityTimelineTests(unittest.TestCase):
             bomb_explodes=pd.DataFrame(),
             smoke_expires=pd.DataFrame(),
             inferno_starts=pd.DataFrame(),
-            sound_events=pd.DataFrame(),
+            sound_effects=pd.DataFrame(),
             inferred_rounds=_inferred_rounds_row(),
             round_id=1,
             tickrate=64.0,

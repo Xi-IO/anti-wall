@@ -69,6 +69,14 @@ demo file
 - 正式 dataset artifact 不再默认写出旧的 `grenades.parquet`
 - viewer 不再依赖 raw grenade trajectory artifact
 
+当前声音 artifact 约定：
+
+- parse 正式输出为 `sound_effect.parquet`，不再以旧的 `sound_events` 作为 canonical table
+- `src/wall/io/sound_effects.py` 负责统一构建声音 emitter schema
+- 这份表允许同时包含 parser 原始事件、推断事件和少量压缩后的连续 emitter
+- `shot_count` 仅用于 `sound_class=weapon` 且 `sound_action=gunfire`，表示一个 gunfire burst 合并了多少条 `fire_bullets`
+- 不引入泛化的 `event_count`；非枪声事件保持 `shot_count=null`
+
 ### 3. Domain layer
 
 目录：
@@ -94,6 +102,13 @@ demo file
 
 - 负责“发生了什么”
 - 不负责“画成什么样”
+
+当前声音语义边界：
+
+- `SoundTimeline` 的正式输入是 `sound_effect.parquet`
+- `SoundTimeline` 消费的是 emitter schema，而不是旧的逐行 `sound_events` 形态
+- gunfire burst compression 属于 domain/IO 边界上的语义整理，不属于 viewer 表现层
+- weapon gunfire 的 burst gap、`shot_count`、`position_mode=entity_at_tick` 都应在进入 viewer 前确定
 
 当前可见性相关语义也放在 domain 层：
 
@@ -261,6 +276,12 @@ wall <demo-or-dataset>
   -> render helpers
 ```
 
+当前终端交互约定：
+
+- `wall.cli` 负责在主链路阶段切换时打印 milestone，例如 `[parse] ...`、`[visibility] ...`、`[viewer] ...`
+- `wall.io.demo_parse` 可以在重解析阶段补充少量完成节点，例如 event tables / ticks / derived tables / metadata
+- `wall.viewer.cli` 只负责 viewer 预启动阶段的简短状态输出；进入 pygame 主循环后不再承担长链路编排日志
+
 如果输入是 demo：
 
 ```text
@@ -300,6 +321,16 @@ dataset
   -> all-round visibility info-event preload
   -> RoundData semantic viewer input
   -> renderer
+```
+
+viewer 声音路径：
+
+```text
+dataset
+  -> sound_effect.parquet
+  -> RoundData.sound_timeline
+  -> SoundTimeline.present_events_at(...)
+  -> render_sound.py
 ```
 
 viewer 投掷物轨迹路径：
@@ -499,8 +530,12 @@ Awpy 的 `maps / navs / tris` 视为运行时外部资产：
 - 普通 viewer 已与默认 `awpy.VisibilityChecker` / geometry cache 初始化解耦
 - `visibility.parquet` 已成为 parse 后默认生成的 canonical interval visibility artifact
 - `grenade_trajectory_segments.parquet` 已成为正式投掷物轨迹 artifact
+- `sound_effect.parquet` 已取代旧 `sound_events`，成为正式声音 emitter artifact
+- gunfire 已从逐发 `fire_bullets` impulse 收口为 burst emitter，并按武器类型使用不同 burst gap
+- `shot_count` 已作为 gunfire 专用字段落到 `sound_effect` schema，用于表达 burst 合并的原始开火次数
 - viewer 投掷物动画已切到 segment artifact，不再消费旧 `grenades.parquet`
 - parse 输出已停止写出旧的 `grenades.parquet/csv`，仅在 parse 进程内短暂保留 raw trajectory 供压缩和声音事件构建使用
+- viewer 声音圈已改为消费 emitter schema 和 `SoundTimeline`，不再直接依赖旧 `sound_events` 事件行
 - viewer sidebar 已切到 visibility event feed，不再显示旧的 round overview / per-player info 面板
 - visibility event feed 已收口到 `viewer/info_events.py`，并只消费 interval visibility schema
 - Players 列表已支持按内部稳定 key 选中，并以 alias fallback 兼容缺少 steamid 的 visibility artifact
@@ -522,3 +557,4 @@ Awpy 的 `maps / navs / tris` 视为运行时外部资产：
 
 - `docs/technical-roadmap.md`
 - `docs/viewer-decoupling-checklist.md`
+- `docs/sound-feed-governance.md`

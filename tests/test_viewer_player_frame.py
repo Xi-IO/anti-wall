@@ -105,7 +105,7 @@ def _round_data() -> object:
         bomb_explodes=pd.DataFrame(),
         smoke_expires=pd.DataFrame(),
         inferno_starts=pd.DataFrame(),
-        sound_events=pd.DataFrame(),
+        sound_effects=pd.DataFrame(),
         inferred_rounds=pd.DataFrame(
             [
                 {

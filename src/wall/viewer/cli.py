@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from wall.output import progress_enabled
+from wall.output import print_milestone, progress_enabled
 from wall.viewer.shell import PygameRoundViewer
 
 
@@ -33,6 +33,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    print_milestone(f"[viewer] Loading dataset index: {args.data_dir}")
     if progress_enabled():
         print(_render_progress_line("viewer", 1, 2, detail="Loading dataset"), flush=True)
     viewer = PygameRoundViewer(
@@ -44,6 +45,7 @@ def main(argv: list[str] | None = None) -> None:
         frame_step=args.frame_step,
         tickrate=args.tickrate,
     )
+    print_milestone("[viewer] Dataset loaded, opening pygame window")
     if progress_enabled():
         print(_render_progress_line("viewer", 2, 2, detail="Opening window"), flush=True)
     viewer.run()

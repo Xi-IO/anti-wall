@@ -44,7 +44,7 @@ class LoadedViewerDataTests(unittest.TestCase):
             smoke_expires=_empty_df(),
             inferno_starts=_empty_df(),
             grenade_trajectory_segments=_empty_df(),
-            sound_events=_empty_df(),
+            sound_effects=_empty_df(),
             inferred_rounds=pd.DataFrame([{"inferred_round_id": 1}]),
             metadata={"derived": {"map_name": "de_test"}},
         )
@@ -80,7 +80,7 @@ class LoadedViewerDataTests(unittest.TestCase):
             smoke_expires=_empty_df(),
             inferno_starts=_empty_df(),
             grenade_trajectory_segments=_empty_df(),
-            sound_events=_empty_df(),
+            sound_effects=_empty_df(),
             inferred_rounds=pd.DataFrame([{"inferred_round_id": 3}, {"inferred_round_id": 1}, {"inferred_round_id": 2}]),
             metadata={},
         )

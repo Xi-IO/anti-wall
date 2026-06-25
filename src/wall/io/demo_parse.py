@@ -8,15 +8,11 @@ import numpy as np
 import pandas as pd
 from demoparser2 import DemoParser
 
-from wall.domain.weapon_overrides import WEAPON_OVERRIDES
-from wall.domain.weapons import find_weapon_spec, load_base_weapon_specs, merge_weapon_specs
 from wall.io.grenade_segments import build_grenade_trajectory_segments_table
+from wall.io.sound_effects import build_sound_effects
 from wall.io.table_io import DEFAULT_TABLE_FORMAT, write_table
-from wall.output import progress_enabled, print_status
+from wall.output import print_milestone, progress_enabled, print_status
 from wall.profile import profile_log, profile_note
-
-
-WEAPON_SPECS = merge_weapon_specs(load_base_weapon_specs(), WEAPON_OVERRIDES)
 
 
 def _render_progress_line(label: str, current: int, total: int, *, detail: str | None = None) -> str:
@@ -121,6 +117,7 @@ def main(argv: list[str] | None = None) -> None:
         raise FileNotFoundError(f"Demo not found: {args.demo}")
 
     total_stages = 6
+    print_milestone(f"[parse] Opening demo: {args.demo}")
     _print_parse_progress(1, total_stages, f"Reading demo {args.demo.name}")
     demo = DemoParser(str(args.demo))
     header = demo.parse_header()
@@ -203,9 +200,14 @@ def main(argv: list[str] | None = None) -> None:
         "inferno_startburn",
     ))
     grenades = normalize_event_table(demo.parse_grenades())
+    print_milestone(
+        "[parse] Event tables ready: "
+        f"fires={len(fires):,}, hurts={len(hurts):,}, footsteps={len(footsteps):,}, grenades={len(grenades):,}"
+    )
 
     _print_parse_progress(3, total_stages, "Parsing tick frames")
     ticks = demo.parse_ticks(args.tick_fields)
+    print_milestone(f"[parse] Tick frames ready: {len(ticks):,} rows")
 
     _print_parse_progress(4, total_stages, "Building round and sound tables")
     jump_by_tick, round_start_ticks = infer_round_boundaries(
@@ -242,7 +244,7 @@ def main(argv: list[str] | None = None) -> None:
     bomb_pickups = build_c4_pickup_events(bomb_pickups, item_pickups, ticks)
     bomb_drops = build_c4_drop_events(bomb_drops, item_drops, ticks)
     bomb_drops = classify_drop_reasons(bomb_drops, deaths)
-    sound_events = build_sound_events(
+    sound_effects = build_sound_effects(
         ticks=ticks,
         footsteps=footsteps,
         fires=fires,
@@ -256,16 +258,19 @@ def main(argv: list[str] | None = None) -> None:
         he_detonates=he_detonates,
         inferno_starts=inferno_starts,
         bomb_begin_plants=bomb_begin_plants,
-        bomb_plants=bomb_plants,
         bomb_begin_defuses=bomb_begin_defuses,
         bomb_abort_defuses=bomb_abort_defuses,
         bomb_defuses=bomb_defuses,
-        bomb_pickups=bomb_pickups,
         bomb_drops=bomb_drops,
         bomb_explodes=bomb_explodes,
     )
     inferred_rounds = build_inferred_rounds_table(ticks, jump_by_tick, round_start_ticks)
     grenade_trajectory_segments = build_grenade_trajectory_segments_table(grenades, tickrate=64.0)
+    print_milestone(
+        "[parse] Derived tables ready: "
+        f"rounds={len(inferred_rounds):,}, sound_effects={len(sound_effects):,}, "
+        f"grenade_segments={len(grenade_trajectory_segments):,}"
+    )
     table_format = args.table_format
     ticks_format = args.ticks_format or table_format
 
@@ -305,7 +310,7 @@ def main(argv: list[str] | None = None) -> None:
             "grenade_trajectory_segments",
             table_format,
         ),
-        "sound_events": write_table(sound_events, output_dir, "sound_events", table_format),
+        "sound_effect": write_table(sound_effects, output_dir, "sound_effect", table_format),
         "ticks": write_table(ticks, output_dir, "ticks", ticks_format),
         "inferred_rounds": write_table(inferred_rounds, output_dir, "inferred_rounds", table_format),
     }
@@ -345,7 +350,7 @@ def main(argv: list[str] | None = None) -> None:
         smoke_expires=smoke_expires,
         inferno_starts=inferno_starts,
         grenade_trajectory_segments=grenade_trajectory_segments,
-        sound_events=sound_events,
+        sound_effects=sound_effects,
         inferred_rounds=inferred_rounds,
         jump_threshold=args.jump_threshold,
         min_jump_players=args.min_jump_players,
@@ -356,6 +361,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     metadata_json.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     _print_parse_progress(6, total_stages, "Done")
+    print_milestone(f"[parse] Metadata written: {metadata_json}")
 
     player_count = int(ticks["name"].dropna().nunique()) if "name" in ticks.columns else 0
     print_status("")
@@ -445,135 +451,6 @@ def _normalize_identifier(series: pd.Series) -> pd.Series:
     return text.fillna("")
 
 
-def _coalesce_numeric(df: pd.DataFrame, columns: list[str]) -> pd.Series:
-    result = pd.Series(np.nan, index=df.index, dtype="float64")
-    for column in columns:
-        if column in df.columns:
-            values = pd.to_numeric(df[column], errors="coerce")
-            result = result.where(result.notna(), values)
-    return result
-
-
-def _empty_sound_events() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "tick": pd.Series(dtype="int64"),
-            "sound_kind": pd.Series(dtype="string"),
-            "sound_source": pd.Series(dtype="string"),
-            "emitter_name": pd.Series(dtype="string"),
-            "emitter_steamid": pd.Series(dtype="string"),
-            "grenade_entity_id": pd.Series(dtype="Int64"),
-            "weapon_id": pd.Series(dtype="string"),
-            "audible_rule": pd.Series(dtype="string"),
-            "is_global": pd.Series(dtype="boolean"),
-            "is_suppressed": pd.Series(dtype="boolean"),
-            "x": pd.Series(dtype="float64"),
-            "y": pd.Series(dtype="float64"),
-            "z": pd.Series(dtype="float64"),
-            "radius_world": pd.Series(dtype="float64"),
-            "duration_ticks": pd.Series(dtype="int64"),
-            "detail": pd.Series(dtype="string"),
-            "impact_speed_z": pd.Series(dtype="float64"),
-            "inferred_round_id": pd.Series(dtype="int64"),
-            "inferred_round_tick": pd.Series(dtype="int64"),
-            "inferred_round_seconds": pd.Series(dtype="float64"),
-        }
-    )
-
-
-GRENADE_BOUNCE_CLUSTER_GAP_TICKS = 6
-GRENADE_BOUNCE_DURATION_TICKS = 12
-
-
-def _position_lookup_from_ticks(ticks: pd.DataFrame) -> pd.DataFrame:
-    work = ticks.copy()
-    work["steamid_key"] = _normalize_identifier(work.get("steamid", pd.Series(index=work.index, dtype="object")))
-    work["name_key"] = _normalize_identifier(work.get("name", pd.Series(index=work.index, dtype="object")))
-    columns = [
-        "tick",
-        "steamid_key",
-        "name_key",
-        "name",
-        "steamid",
-        "X",
-        "Y",
-        "Z",
-        "ducking",
-        "is_airborne",
-        "velocity_X",
-        "velocity_Y",
-        "velocity_Z",
-        "inferred_round_id",
-        "inferred_round_tick",
-        "inferred_round_seconds",
-    ]
-    existing = [column for column in columns if column in work.columns]
-    return work[existing].copy()
-
-
-def enrich_sound_event_positions(events: pd.DataFrame, ticks: pd.DataFrame) -> pd.DataFrame:
-    if events.empty:
-        return events.copy()
-    work = events.copy()
-    if "tick" not in work.columns:
-        raise ValueError("sound source table is missing required tick column")
-    work["emitter_steamid"] = _normalize_identifier(work.get("emitter_steamid", pd.Series(index=work.index, dtype="object")))
-    work["emitter_name"] = _normalize_identifier(work.get("emitter_name", pd.Series(index=work.index, dtype="object")))
-    work["x"] = _coalesce_numeric(work, ["x", "X", "origin_x", "ent_origin_x"])
-    work["y"] = _coalesce_numeric(work, ["y", "Y", "origin_y", "ent_origin_y"])
-    work["z"] = _coalesce_numeric(work, ["z", "Z", "origin_z", "ent_origin_z"])
-    needs_position = work[["x", "y", "z"]].isna().any(axis=1)
-    if not needs_position.any():
-        return work
-
-    lookup = _position_lookup_from_ticks(ticks)
-    steamid_match = lookup.rename(
-        columns={
-            "X": "tick_x",
-            "Y": "tick_y",
-            "Z": "tick_z",
-            "name": "tick_name",
-            "steamid": "tick_steamid",
-        }
-    )
-    steamid_match = steamid_match[steamid_match["steamid_key"] != ""].drop_duplicates(["tick", "steamid_key"], keep="first")
-    work = work.merge(
-        steamid_match[["tick", "steamid_key", "tick_x", "tick_y", "tick_z", "tick_name", "tick_steamid"]],
-        left_on=["tick", "emitter_steamid"],
-        right_on=["tick", "steamid_key"],
-        how="left",
-    )
-    for target, source in (("x", "tick_x"), ("y", "tick_y"), ("z", "tick_z")):
-        work[target] = work[target].where(work[target].notna(), work[source])
-    work["emitter_name"] = work["emitter_name"].where(work["emitter_name"] != "", _normalize_identifier(work["tick_name"]))
-    work["emitter_steamid"] = work["emitter_steamid"].where(work["emitter_steamid"] != "", _normalize_identifier(work["tick_steamid"]))
-    work = work.drop(columns=[column for column in ["steamid_key", "tick_x", "tick_y", "tick_z", "tick_name", "tick_steamid"] if column in work.columns])
-
-    still_missing = work[["x", "y", "z"]].isna().any(axis=1)
-    if not still_missing.any():
-        return work
-
-    name_match = lookup.rename(
-        columns={
-            "X": "tick_x",
-            "Y": "tick_y",
-            "Z": "tick_z",
-            "name": "tick_name",
-            "steamid": "tick_steamid",
-        }
-    )
-    name_match = name_match[name_match["name_key"] != ""].drop_duplicates(["tick", "name_key"], keep="first")
-    work = work.merge(
-        name_match[["tick", "name_key", "tick_x", "tick_y", "tick_z", "tick_name", "tick_steamid"]],
-        left_on=["tick", "emitter_name"],
-        right_on=["tick", "name_key"],
-        how="left",
-    )
-    for target, source in (("x", "tick_x"), ("y", "tick_y"), ("z", "tick_z")):
-        work[target] = work[target].where(work[target].notna(), work[source])
-    work["emitter_name"] = work["emitter_name"].where(work["emitter_name"] != "", _normalize_identifier(work["tick_name"]))
-    work["emitter_steamid"] = work["emitter_steamid"].where(work["emitter_steamid"] != "", _normalize_identifier(work["tick_steamid"]))
-    return work.drop(columns=[column for column in ["name_key", "tick_x", "tick_y", "tick_z", "tick_name", "tick_steamid"] if column in work.columns])
 
 
 def build_c4_pickup_events(
@@ -928,818 +805,6 @@ def classify_drop_reasons(
     return out
 
 
-def build_landing_sound_events(ticks: pd.DataFrame) -> pd.DataFrame:
-    required = {"tick", "name", "steamid", "X", "Y", "Z", "is_airborne", "velocity_Z", "inferred_round_id", "inferred_round_tick", "inferred_round_seconds"}
-    if ticks.empty or not required.issubset(ticks.columns):
-        return _empty_sound_events()
-
-    selected_columns = list(required)
-    if "ducking" in ticks.columns:
-        selected_columns.append("ducking")
-    work = ticks[selected_columns].copy()
-    work["steamid_key"] = _normalize_identifier(work["steamid"])
-    work["name"] = _normalize_identifier(work["name"])
-    work["tick"] = pd.to_numeric(work["tick"], errors="coerce")
-    work["X"] = pd.to_numeric(work["X"], errors="coerce")
-    work["Y"] = pd.to_numeric(work["Y"], errors="coerce")
-    work["Z"] = pd.to_numeric(work["Z"], errors="coerce")
-    work["velocity_Z"] = pd.to_numeric(work["velocity_Z"], errors="coerce")
-    work["is_airborne"] = work["is_airborne"].fillna(False).astype(bool)
-    if "ducking" in work.columns:
-        work["ducking"] = work["ducking"].fillna(False).astype(bool)
-    work = work.dropna(subset=["tick"]).sort_values(["steamid_key", "name", "tick"]).copy()
-
-    player_keys = ["steamid_key", "name"]
-    prev_airborne = work.groupby(player_keys, sort=False)["is_airborne"].shift(1).fillna(False).astype(bool)
-    airborne_start = work["is_airborne"] & ~prev_airborne
-    airborne_run_id = airborne_start.groupby([work["steamid_key"], work["name"]]).cumsum()
-    work["airborne_run_id"] = airborne_run_id.where(work["is_airborne"], np.nan)
-
-    airborne_rows = work[work["is_airborne"] & work["airborne_run_id"].notna()].copy()
-    if airborne_rows.empty:
-        return _empty_sound_events()
-    airborne_summary = (
-        airborne_rows.groupby(player_keys + ["airborne_run_id"], sort=False)
-        .agg(
-            peak_height=("Z", "max"),
-            min_velocity_z=("velocity_Z", "min"),
-            max_velocity_z=("velocity_Z", "max"),
-            airborne_ticks=("tick", "size"),
-        )
-        .reset_index()
-    )
-    airborne_summary["impact_speed_z"] = airborne_summary["min_velocity_z"].abs()
-    airborne_summary["had_upward_launch"] = airborne_summary["max_velocity_z"] > 200.0
-
-    landing_mask = ~work["is_airborne"] & prev_airborne
-    landing_rows = work[landing_mask].copy()
-    if landing_rows.empty:
-        return _empty_sound_events()
-    landing_rows["airborne_run_id"] = airborne_run_id.groupby([work["steamid_key"], work["name"]]).shift(1)[landing_mask]
-    landing_rows = landing_rows[landing_rows["airborne_run_id"].notna()].copy()
-    if landing_rows.empty:
-        return _empty_sound_events()
-
-    merged = landing_rows.merge(
-        airborne_summary,
-        on=player_keys + ["airborne_run_id"],
-        how="left",
-    )
-    merged["vertical_drop"] = merged["peak_height"] - merged["Z"]
-    merged = merged[merged["airborne_ticks"] >= 2].copy()
-    merged["is_fall_land"] = merged["impact_speed_z"] > 300.0
-    merged["is_jump_land"] = merged["had_upward_launch"] & (
-        (merged["impact_speed_z"] >= 200.0) | (merged["vertical_drop"] >= 12.0)
-    )
-    merged = merged[merged["is_fall_land"] | merged["is_jump_land"]].copy()
-    if merged.empty:
-        return _empty_sound_events()
-
-    merged["detail"] = np.where(merged["is_jump_land"], "jump_land", "fall_land")
-    merged["detail"] = (
-        merged["detail"].astype(str)
-        + "|air_ticks="
-        + merged["airborne_ticks"].fillna(0).astype(int).astype(str)
-        + "|drop="
-        + merged["vertical_drop"].fillna(0.0).map(lambda value: f"{value:.1f}")
-    )
-
-    result = pd.DataFrame(
-        {
-            "tick": merged["tick"].astype("int64"),
-            "sound_kind": "landing",
-            "sound_source": "inferred_landing",
-            "emitter_name": merged["name"].astype(str),
-            "emitter_steamid": merged["steamid_key"].astype(str),
-            "x": merged["X"].astype("float64"),
-            "y": merged["Y"].astype("float64"),
-            "z": merged["Z"].astype("float64"),
-            "radius_world": 1062.0,
-            "duration_ticks": 6,
-            "detail": merged["detail"].astype("string"),
-            "impact_speed_z": merged["impact_speed_z"].astype("float64"),
-            "inferred_round_id": merged["inferred_round_id"].astype("int64"),
-            "inferred_round_tick": merged["inferred_round_tick"].astype("int64"),
-            "inferred_round_seconds": merged["inferred_round_seconds"].astype("float64"),
-        }
-    )
-    return result.sort_values(["tick", "emitter_name"]).reset_index(drop=True)
-
-
-def build_movement_sound_events(ticks: pd.DataFrame) -> pd.DataFrame:
-    required = {
-        "tick",
-        "name",
-        "steamid",
-        "X",
-        "Y",
-        "Z",
-        "ducking",
-        "is_airborne",
-        "velocity_X",
-        "velocity_Y",
-        "inferred_round_id",
-        "inferred_round_tick",
-        "inferred_round_seconds",
-    }
-    if ticks.empty or not required.issubset(ticks.columns):
-        return _empty_sound_events()
-
-    work = ticks[list(required)].copy()
-    work["name"] = _normalize_identifier(work["name"])
-    work["steamid_key"] = _normalize_identifier(work["steamid"])
-    work["tick"] = pd.to_numeric(work["tick"], errors="coerce")
-    work["X"] = pd.to_numeric(work["X"], errors="coerce")
-    work["Y"] = pd.to_numeric(work["Y"], errors="coerce")
-    work["Z"] = pd.to_numeric(work["Z"], errors="coerce")
-    work["velocity_X"] = pd.to_numeric(work["velocity_X"], errors="coerce")
-    work["velocity_Y"] = pd.to_numeric(work["velocity_Y"], errors="coerce")
-    work["ducking"] = work["ducking"].fillna(False).astype(bool)
-    work["is_airborne"] = work["is_airborne"].fillna(False).astype(bool)
-    work = work.dropna(subset=["tick"]).sort_values(["steamid_key", "name", "tick"]).copy()
-
-    work["speed_xy"] = np.sqrt(work["velocity_X"].fillna(0.0) ** 2 + work["velocity_Y"].fillna(0.0) ** 2)
-    work["is_audible_move"] = (
-        (work["speed_xy"] > 135.0)
-        & (work["speed_xy"] < 320.0)
-        & (~work["is_airborne"])
-        & (~work["ducking"])
-    )
-    if not bool(work["is_audible_move"].any()):
-        return _empty_sound_events()
-
-    player_keys = ["steamid_key", "name"]
-    prev_move = work.groupby(player_keys, sort=False)["is_audible_move"].shift(1).fillna(False).astype(bool)
-    move_start = work["is_audible_move"] & ~prev_move
-    move_run_id = move_start.groupby([work["steamid_key"], work["name"]]).cumsum()
-    work["move_run_id"] = move_run_id.where(work["is_audible_move"], np.nan)
-
-    moving = work[work["is_audible_move"] & work["move_run_id"].notna()].copy()
-    if moving.empty:
-        return _empty_sound_events()
-
-    moving["move_index"] = moving.groupby(player_keys + ["move_run_id"], sort=False).cumcount()
-    sampled = moving[(moving["move_index"] % 8) == 0].copy()
-    if sampled.empty:
-        return _empty_sound_events()
-
-    sampled["detail"] = "movement_inferred|speed_xy=" + sampled["speed_xy"].map(lambda value: f"{value:.1f}")
-    result = pd.DataFrame(
-        {
-            "tick": sampled["tick"].astype("int64"),
-            "sound_kind": "footstep",
-            "sound_source": "inferred_movement",
-            "emitter_name": sampled["name"].astype(str),
-            "emitter_steamid": sampled["steamid_key"].astype(str),
-            "x": sampled["X"].astype("float64"),
-            "y": sampled["Y"].astype("float64"),
-            "z": sampled["Z"].astype("float64"),
-            "radius_world": 850.0,
-            "duration_ticks": 7,
-            "detail": sampled["detail"].astype("string"),
-            "impact_speed_z": np.nan,
-            "inferred_round_id": sampled["inferred_round_id"].astype("int64"),
-            "inferred_round_tick": sampled["inferred_round_tick"].astype("int64"),
-            "inferred_round_seconds": sampled["inferred_round_seconds"].astype("float64"),
-        }
-    )
-    return result.sort_values(["tick", "emitter_name"]).reset_index(drop=True)
-
-
-def build_grenade_bounce_sound_events(grenades: pd.DataFrame) -> pd.DataFrame:
-    required = {"grenade_type", "grenade_entity_id", "x", "y", "z", "tick", "steamid", "name"}
-    if grenades.empty or not required.issubset(grenades.columns):
-        return _empty_sound_events()
-
-    work = grenades[list(required | {"inferred_round_id", "inferred_round_tick", "inferred_round_seconds"})].copy()
-    work["tick"] = pd.to_numeric(work["tick"], errors="coerce")
-    work["x"] = pd.to_numeric(work["x"], errors="coerce")
-    work["y"] = pd.to_numeric(work["y"], errors="coerce")
-    work["z"] = pd.to_numeric(work["z"], errors="coerce")
-    work["grenade_entity_id"] = pd.to_numeric(work["grenade_entity_id"], errors="coerce")
-    work["steamid_key"] = _normalize_identifier(work["steamid"])
-    work["name"] = _normalize_identifier(work["name"])
-    work["grenade_type"] = work["grenade_type"].astype("string")
-    work = work.dropna(subset=["tick", "x", "y", "z", "grenade_entity_id"]).copy()
-    work = work[work["grenade_type"].str.contains("Projectile", na=False)].copy()
-    if work.empty:
-        return _empty_sound_events()
-
-    work = work.sort_values(["grenade_entity_id", "tick"]).copy()
-    entity_keys = ["grenade_entity_id"]
-    work["prev_x"] = work.groupby(entity_keys, sort=False)["x"].shift(1)
-    work["prev_y"] = work.groupby(entity_keys, sort=False)["y"].shift(1)
-    work["prev_z"] = work.groupby(entity_keys, sort=False)["z"].shift(1)
-    work["next_x"] = work.groupby(entity_keys, sort=False)["x"].shift(-1)
-    work["next_y"] = work.groupby(entity_keys, sort=False)["y"].shift(-1)
-    work["next_z"] = work.groupby(entity_keys, sort=False)["z"].shift(-1)
-
-    work["vx_in"] = work["x"] - work["prev_x"]
-    work["vy_in"] = work["y"] - work["prev_y"]
-    work["vz_in"] = work["z"] - work["prev_z"]
-    work["vx_out"] = work["next_x"] - work["x"]
-    work["vy_out"] = work["next_y"] - work["y"]
-    work["vz_out"] = work["next_z"] - work["z"]
-    work["speed_in"] = np.sqrt(work["vx_in"] ** 2 + work["vy_in"] ** 2 + work["vz_in"] ** 2)
-    work["speed_out"] = np.sqrt(work["vx_out"] ** 2 + work["vy_out"] ** 2 + work["vz_out"] ** 2)
-    work["speed_in_xy"] = np.sqrt(work["vx_in"] ** 2 + work["vy_in"] ** 2)
-    work["speed_out_xy"] = np.sqrt(work["vx_out"] ** 2 + work["vy_out"] ** 2)
-    work["planar_turn"] = (work["vx_in"] * work["vx_out"]) + (work["vy_in"] * work["vy_out"])
-    work["planar_turn_cos"] = work["planar_turn"] / (
-        work["speed_in_xy"] * work["speed_out_xy"]
-    )
-    work["vertical_bounce"] = (work["vz_in"] < -1.5) & (work["vz_out"] > 1.5)
-    work["hard_turn"] = (
-        (work["speed_in_xy"] > 1.5)
-        & (work["speed_out_xy"] > 1.5)
-        & work["planar_turn_cos"].notna()
-        & (work["planar_turn_cos"] < 0.985)
-    )
-    work["bounce_candidate"] = work["vertical_bounce"] | work["hard_turn"]
-    candidates = work[work["bounce_candidate"]].copy()
-    if candidates.empty:
-        return _empty_sound_events()
-
-    # A single wall impact often produces several adjacent trajectory kinks.
-    # Collapse short same-grenade runs into one semantic bounce event.
-    # IMPORTANT: this is semantic deduplication, not a visual tweak. Viewer code should
-    # receive one bounce event per short impact burst instead of re-implementing this.
-    candidates = candidates.sort_values(["grenade_entity_id", "tick"]).copy()
-    tick_gap = candidates.groupby("grenade_entity_id", sort=False)["tick"].diff()
-    candidates["bounce_cluster_start"] = tick_gap.isna() | (tick_gap > GRENADE_BOUNCE_CLUSTER_GAP_TICKS)
-    candidates["bounce_cluster"] = (
-        candidates.groupby("grenade_entity_id", sort=False)["bounce_cluster_start"].cumsum().astype("int64")
-    )
-    vertical_score = candidates["vertical_bounce"].astype("int64") * 1000
-    impact_score = (
-        candidates["vz_out"].abs().fillna(0.0)
-        + candidates["vz_in"].abs().fillna(0.0)
-        + candidates["speed_in_xy"].fillna(0.0)
-        + candidates["speed_out_xy"].fillna(0.0)
-    )
-    candidates["bounce_pick_score"] = vertical_score + impact_score
-    candidates = (
-        candidates.sort_values(
-            ["grenade_entity_id", "bounce_cluster", "bounce_pick_score", "tick"],
-            ascending=[True, True, False, True],
-        )
-        .drop_duplicates(["grenade_entity_id", "bounce_cluster"], keep="first")
-        .sort_values(["tick", "grenade_entity_id"])
-        .copy()
-    )
-
-    candidates["detail"] = np.where(candidates["vertical_bounce"], "grenade_bounce_vertical", "grenade_bounce_turn")
-    result = pd.DataFrame(
-        {
-            "tick": candidates["tick"].astype("int64"),
-            "sound_kind": "grenade_bounce",
-            "sound_source": "grenade_bounce",
-            "emitter_name": candidates["name"].astype(str),
-            "emitter_steamid": candidates["steamid_key"].astype(str),
-            "grenade_entity_id": candidates["grenade_entity_id"].astype("Int64"),
-            "x": candidates["x"].astype("float64"),
-            "y": candidates["y"].astype("float64"),
-            "z": candidates["z"].astype("float64"),
-            "radius_world": 650.0,
-            "duration_ticks": GRENADE_BOUNCE_DURATION_TICKS,
-            "detail": (candidates["detail"].astype(str) + "|" + candidates["grenade_type"].astype(str)).astype("string"),
-            "impact_speed_z": np.nan,
-            "inferred_round_id": candidates["inferred_round_id"].astype("int64"),
-            "inferred_round_tick": candidates["inferred_round_tick"].astype("int64"),
-            "inferred_round_seconds": candidates["inferred_round_seconds"].astype("float64"),
-        }
-    )
-    return result.sort_values(["tick", "emitter_name"]).reset_index(drop=True)
-
-
-def normalize_sound_source(
-    events: pd.DataFrame,
-    *,
-    sound_kind: str,
-    sound_source: str,
-    radius_world: float,
-    duration_ticks: int,
-    emitter_name_col: str | None,
-    emitter_steamid_col: str | None,
-    detail_value: str = "",
-    x_candidates: list[str] | None = None,
-    y_candidates: list[str] | None = None,
-    z_candidates: list[str] | None = None,
-) -> pd.DataFrame:
-    if events.empty:
-        return _empty_sound_events()
-    if "tick" not in events.columns:
-        raise ValueError(f"{sound_source} is missing required tick column")
-    out = pd.DataFrame()
-    out["tick"] = pd.to_numeric(events["tick"], errors="coerce").astype("Int64")
-    out["sound_kind"] = sound_kind
-    out["sound_source"] = sound_source
-    out["emitter_name"] = _normalize_identifier(events[emitter_name_col]) if emitter_name_col and emitter_name_col in events.columns else ""
-    out["emitter_steamid"] = _normalize_identifier(events[emitter_steamid_col]) if emitter_steamid_col and emitter_steamid_col in events.columns else ""
-    out["grenade_entity_id"] = pd.Series(pd.NA, index=events.index, dtype="Int64")
-    out["x"] = _coalesce_numeric(events, x_candidates or [])
-    out["y"] = _coalesce_numeric(events, y_candidates or [])
-    out["z"] = _coalesce_numeric(events, z_candidates or [])
-    out["radius_world"] = float(radius_world)
-    out["duration_ticks"] = int(duration_ticks)
-    out["detail"] = detail_value
-    out["impact_speed_z"] = np.nan
-    for column in ("inferred_round_id", "inferred_round_tick", "inferred_round_seconds"):
-        if column in events.columns:
-            out[column] = events[column]
-    out = out.dropna(subset=["tick"]).copy()
-    out["tick"] = out["tick"].astype("int64")
-    return out
-
-
-def build_gunfire_sound_events(fires: pd.DataFrame) -> pd.DataFrame:
-    if fires.empty:
-        return _empty_sound_events()
-    out = normalize_sound_source(
-        fires,
-        sound_kind="gunfire",
-        sound_source="fire_bullets",
-        radius_world=1600.0,
-        duration_ticks=4,
-        emitter_name_col="user_name",
-        emitter_steamid_col="user_steamid",
-        detail_value="event",
-        x_candidates=["origin_x", "ent_origin_x", "X"],
-        y_candidates=["origin_y", "ent_origin_y", "Y"],
-        z_candidates=["origin_z", "ent_origin_z", "Z"],
-    )
-    if out.empty:
-        return out
-
-    item_def_index = pd.to_numeric(fires.get("item_def_index"), errors="coerce")
-    radii: list[float] = []
-    details: list[str] = []
-    weapon_ids: list[str] = []
-    audible_rules: list[str] = []
-    is_globals: list[bool] = []
-    is_suppressed: list[bool] = []
-    for value in item_def_index.tolist():
-        spec = find_weapon_spec(WEAPON_SPECS, value)
-        if spec is None:
-            radii.append(5000.0)
-            weapon_ids.append("unknown")
-            audible_rules.append("global")
-            is_globals.append(True)
-            is_suppressed.append(False)
-            details.append("unknown_global")
-            continue
-        fire_radius = spec.sound.fire_radius if spec.sound.fire_radius is not None else 5000.0
-        radii.append(float(fire_radius))
-        weapon_ids.append(spec.weapon_id)
-        if spec.sound.global_fire:
-            audible_rules.append("global")
-            is_globals.append(True)
-            is_suppressed.append(False)
-            details.append(f"{spec.weapon_id}_global")
-        elif spec.sound.suppressed:
-            audible_rules.append("radius")
-            is_globals.append(False)
-            is_suppressed.append(True)
-            details.append(f"{spec.weapon_id}_suppressed")
-        else:
-            audible_rules.append("radius")
-            is_globals.append(False)
-            is_suppressed.append(False)
-            details.append(spec.weapon_id)
-    out["weapon_id"] = pd.Series(weapon_ids, index=out.index, dtype="string")
-    out["audible_rule"] = pd.Series(audible_rules, index=out.index, dtype="string")
-    out["is_global"] = pd.Series(is_globals, index=out.index, dtype="boolean")
-    out["is_suppressed"] = pd.Series(is_suppressed, index=out.index, dtype="boolean")
-    out["radius_world"] = radii
-    out["detail"] = pd.Series(details, index=out.index, dtype="string")
-    return out
-
-
-def build_weapon_reload_sound_events(weapon_reloads: pd.DataFrame) -> pd.DataFrame:
-    if weapon_reloads.empty:
-        return _empty_sound_events()
-    out = normalize_sound_source(
-        weapon_reloads,
-        sound_kind="utility",
-        sound_source="weapon_reload",
-        radius_world=550.0,
-        duration_ticks=8,
-        emitter_name_col="user_name",
-        emitter_steamid_col="user_steamid",
-        detail_value="reload",
-    )
-    if out.empty:
-        return out
-    if "defindex" not in weapon_reloads.columns:
-        out["weapon_id"] = pd.Series(["unknown"] * len(out), index=out.index, dtype="string")
-        out["audible_rule"] = pd.Series(["radius"] * len(out), index=out.index, dtype="string")
-        out["is_global"] = pd.Series([False] * len(out), index=out.index, dtype="boolean")
-        out["is_suppressed"] = pd.Series([False] * len(out), index=out.index, dtype="boolean")
-        out["detail"] = pd.Series(["reload_default"] * len(out), index=out.index, dtype="string")
-        return out
-    defindex = pd.to_numeric(weapon_reloads.get("defindex"), errors="coerce")
-    radii: list[float] = []
-    details: list[str] = []
-    weapon_ids: list[str] = []
-    audible_rules: list[str] = []
-    is_globals: list[bool] = []
-    is_suppressed: list[bool] = []
-    for value in defindex.tolist():
-        spec = find_weapon_spec(WEAPON_SPECS, value)
-        if spec is None:
-            radii.append(550.0)
-            weapon_ids.append("unknown")
-            audible_rules.append("radius")
-            is_globals.append(False)
-            is_suppressed.append(False)
-            details.append("reload_default")
-            continue
-        reload_radius = spec.sound.reload_radius if spec.sound.reload_radius is not None else 550.0
-        radii.append(float(reload_radius))
-        weapon_ids.append(spec.weapon_id)
-        audible_rules.append("radius")
-        is_globals.append(False)
-        is_suppressed.append(bool(spec.sound.suppressed))
-        details.append(f"{spec.weapon_id}_reload")
-    out["weapon_id"] = pd.Series(weapon_ids, index=out.index, dtype="string")
-    out["audible_rule"] = pd.Series(audible_rules, index=out.index, dtype="string")
-    out["is_global"] = pd.Series(is_globals, index=out.index, dtype="boolean")
-    out["is_suppressed"] = pd.Series(is_suppressed, index=out.index, dtype="boolean")
-    out["radius_world"] = radii
-    out["detail"] = pd.Series(details, index=out.index, dtype="string")
-    return out
-
-
-def build_weapon_zoom_sound_events(weapon_zooms: pd.DataFrame) -> pd.DataFrame:
-    if weapon_zooms.empty:
-        return _empty_sound_events()
-    out = normalize_sound_source(
-        weapon_zooms,
-        sound_kind="utility",
-        sound_source="weapon_zoom",
-        radius_world=275.0,
-        duration_ticks=6,
-        emitter_name_col="user_name",
-        emitter_steamid_col="user_steamid",
-        detail_value="zoom",
-    )
-    if out.empty:
-        return out
-    if "defindex" not in weapon_zooms.columns:
-        out["weapon_id"] = pd.Series(["unknown"] * len(out), index=out.index, dtype="string")
-        out["audible_rule"] = pd.Series(["radius"] * len(out), index=out.index, dtype="string")
-        out["is_global"] = pd.Series([False] * len(out), index=out.index, dtype="boolean")
-        out["is_suppressed"] = pd.Series([False] * len(out), index=out.index, dtype="boolean")
-        out["detail"] = pd.Series(["zoom_default"] * len(out), index=out.index, dtype="string")
-        return out
-    defindex = pd.to_numeric(weapon_zooms.get("defindex"), errors="coerce")
-    radii: list[float] = []
-    details: list[str] = []
-    weapon_ids: list[str] = []
-    audible_rules: list[str] = []
-    is_globals: list[bool] = []
-    is_suppressed: list[bool] = []
-    for value in defindex.tolist():
-        spec = find_weapon_spec(WEAPON_SPECS, value)
-        if spec is None:
-            radii.append(275.0)
-            weapon_ids.append("unknown")
-            audible_rules.append("radius")
-            is_globals.append(False)
-            is_suppressed.append(False)
-            details.append("zoom_default")
-            continue
-        zoom_radius = spec.sound.zoom_radius if spec.sound.zoom_radius is not None else 275.0
-        radii.append(float(zoom_radius))
-        weapon_ids.append(spec.weapon_id)
-        audible_rules.append("radius")
-        is_globals.append(False)
-        is_suppressed.append(bool(spec.sound.suppressed))
-        details.append(f"{spec.weapon_id}_zoom")
-    out["weapon_id"] = pd.Series(weapon_ids, index=out.index, dtype="string")
-    out["audible_rule"] = pd.Series(audible_rules, index=out.index, dtype="string")
-    out["is_global"] = pd.Series(is_globals, index=out.index, dtype="boolean")
-    out["is_suppressed"] = pd.Series(is_suppressed, index=out.index, dtype="boolean")
-    out["radius_world"] = radii
-    out["detail"] = pd.Series(details, index=out.index, dtype="string")
-    return out
-
-
-def build_item_drop_sound_events(item_drops: pd.DataFrame) -> pd.DataFrame:
-    if item_drops.empty:
-        return _empty_sound_events()
-    out = normalize_sound_source(
-        item_drops,
-        sound_kind="weapon_drop",
-        sound_source="item_drop",
-        radius_world=650.0,
-        duration_ticks=10,
-        emitter_name_col="user_name",
-        emitter_steamid_col="user_steamid",
-        detail_value="item_drop_unknown",
-        x_candidates=["X", "x"],
-        y_candidates=["Y", "y"],
-        z_candidates=["Z", "z"],
-    )
-    if out.empty:
-        return out
-    if "defindex" not in item_drops.columns:
-        out["weapon_id"] = pd.Series(["unknown"] * len(out), index=out.index, dtype="string")
-        out["audible_rule"] = pd.Series(["radius"] * len(out), index=out.index, dtype="string")
-        out["is_global"] = pd.Series([False] * len(out), index=out.index, dtype="boolean")
-        out["is_suppressed"] = pd.Series([False] * len(out), index=out.index, dtype="boolean")
-        return out
-
-    defindex = pd.to_numeric(item_drops.get("defindex"), errors="coerce")
-    item_name = _normalize_identifier(item_drops.get("item_name", pd.Series(index=item_drops.index, dtype="object"))).str.lower()
-    keep_mask: list[bool] = []
-    sound_kinds: list[str] = []
-    radii: list[float] = []
-    details: list[str] = []
-    weapon_ids: list[str] = []
-    audible_rules: list[str] = []
-    is_globals: list[bool] = []
-    is_suppressed: list[bool] = []
-
-    grenade_weapon_ids = {
-        "weapon_flashbang",
-        "weapon_hegrenade",
-        "weapon_smokegrenade",
-        "weapon_molotov",
-        "weapon_decoy",
-        "weapon_incgrenade",
-    }
-
-    for index, value in enumerate(defindex.tolist()):
-        name_value = item_name.iloc[index]
-        spec = find_weapon_spec(WEAPON_SPECS, value)
-        weapon_id = spec.weapon_id if spec is not None else "unknown"
-        if value == 49 or "c4" in name_value or weapon_id == "weapon_c4":
-            keep_mask.append(False)
-            sound_kinds.append("bomb")
-            radii.append(0.0)
-            details.append("c4_drop")
-            weapon_ids.append("weapon_c4")
-            audible_rules.append("radius")
-            is_globals.append(False)
-            is_suppressed.append(False)
-            continue
-
-        keep_mask.append(True)
-        drop_radius = spec.sound.drop_radius if spec is not None and spec.sound.drop_radius is not None else 650.0
-        category_id = spec.category.id if spec is not None else ""
-        category_name = spec.category.name if spec is not None else ""
-        category_text = f"{category_id} {category_name}".lower()
-        is_grenade = weapon_id in grenade_weapon_ids or "grenade" in weapon_id or "grenade" in category_text or "molotov" in weapon_id or "decoy" in weapon_id
-        if is_grenade:
-            sound_kind = "utility_drop"
-            detail_prefix = "utility_drop"
-        else:
-            sound_kind = "weapon_drop"
-            detail_prefix = "weapon_drop"
-        sound_kinds.append(sound_kind)
-        radii.append(float(drop_radius))
-        details.append(f"{detail_prefix}|{weapon_id}")
-        weapon_ids.append(weapon_id)
-        audible_rules.append("radius")
-        is_globals.append(False)
-        is_suppressed.append(bool(spec.sound.suppressed) if spec is not None else False)
-
-    out["sound_kind"] = pd.Series(sound_kinds, index=out.index, dtype="string")
-    out["weapon_id"] = pd.Series(weapon_ids, index=out.index, dtype="string")
-    out["audible_rule"] = pd.Series(audible_rules, index=out.index, dtype="string")
-    out["is_global"] = pd.Series(is_globals, index=out.index, dtype="boolean")
-    out["is_suppressed"] = pd.Series(is_suppressed, index=out.index, dtype="boolean")
-    out["radius_world"] = radii
-    out["detail"] = pd.Series(details, index=out.index, dtype="string")
-    keep = pd.Series(keep_mask, index=out.index, dtype="boolean")
-    out = out[keep.fillna(False)].copy()
-    return out.reset_index(drop=True)
-
-
-def build_sound_events(
-    *,
-    ticks: pd.DataFrame,
-    footsteps: pd.DataFrame,
-    fires: pd.DataFrame,
-    hurts: pd.DataFrame,
-    item_drops: pd.DataFrame,
-    weapon_reloads: pd.DataFrame,
-    weapon_zooms: pd.DataFrame,
-    grenades: pd.DataFrame,
-    smoke_detonates: pd.DataFrame,
-    flash_detonates: pd.DataFrame,
-    he_detonates: pd.DataFrame,
-    inferno_starts: pd.DataFrame,
-    bomb_begin_plants: pd.DataFrame,
-    bomb_plants: pd.DataFrame,
-    bomb_begin_defuses: pd.DataFrame,
-    bomb_abort_defuses: pd.DataFrame,
-    bomb_defuses: pd.DataFrame,
-    bomb_pickups: pd.DataFrame,
-    bomb_drops: pd.DataFrame,
-    bomb_explodes: pd.DataFrame,
-) -> pd.DataFrame:
-    sound_tables = [
-        normalize_sound_source(
-            footsteps,
-            sound_kind="footstep",
-            sound_source="player_footstep",
-            radius_world=850.0,
-            duration_ticks=6,
-            emitter_name_col="user_name",
-            emitter_steamid_col="user_steamid",
-            detail_value="event",
-        ),
-        build_gunfire_sound_events(fires),
-        normalize_sound_source(
-            hurts,
-            sound_kind="damage",
-            sound_source="player_hurt",
-            radius_world=900.0,
-            duration_ticks=8,
-            emitter_name_col="user_name",
-            emitter_steamid_col="user_steamid",
-            detail_value="hurt",
-        ),
-        build_item_drop_sound_events(item_drops),
-        build_weapon_reload_sound_events(weapon_reloads),
-        build_weapon_zoom_sound_events(weapon_zooms),
-        normalize_sound_source(
-            smoke_detonates,
-            sound_kind="utility",
-            sound_source="smokegrenade_detonate",
-            radius_world=1000.0,
-            duration_ticks=10,
-            emitter_name_col="user_name",
-            emitter_steamid_col="user_steamid",
-            detail_value="smoke",
-            x_candidates=["x", "X"],
-            y_candidates=["y", "Y"],
-            z_candidates=["z", "Z"],
-        ),
-        normalize_sound_source(
-            flash_detonates,
-            sound_kind="utility",
-            sound_source="flashbang_detonate",
-            radius_world=1000.0,
-            duration_ticks=10,
-            emitter_name_col="user_name",
-            emitter_steamid_col="user_steamid",
-            detail_value="flash",
-            x_candidates=["x", "X"],
-            y_candidates=["y", "Y"],
-            z_candidates=["z", "Z"],
-        ),
-        normalize_sound_source(
-            he_detonates,
-            sound_kind="utility",
-            sound_source="hegrenade_detonate",
-            radius_world=1200.0,
-            duration_ticks=12,
-            emitter_name_col="user_name",
-            emitter_steamid_col="user_steamid",
-            detail_value="he",
-            x_candidates=["x", "X"],
-            y_candidates=["y", "Y"],
-            z_candidates=["z", "Z"],
-        ),
-        normalize_sound_source(
-            inferno_starts,
-            sound_kind="utility",
-            sound_source="inferno_startburn",
-            radius_world=1100.0,
-            duration_ticks=16,
-            emitter_name_col="user_name",
-            emitter_steamid_col="user_steamid",
-            detail_value="inferno",
-            x_candidates=["x", "X"],
-            y_candidates=["y", "Y"],
-            z_candidates=["z", "Z"],
-        ),
-        build_grenade_bounce_sound_events(grenades),
-        normalize_sound_source(
-            bomb_pickups,
-            sound_kind="bomb",
-            sound_source="bomb_pickup",
-            radius_world=700.0,
-            duration_ticks=8,
-            emitter_name_col="user_name",
-            emitter_steamid_col="user_steamid",
-            detail_value="pickup",
-            x_candidates=["X"],
-            y_candidates=["Y"],
-            z_candidates=["Z"],
-        ),
-        normalize_sound_source(
-            bomb_drops,
-            sound_kind="bomb",
-            sound_source="bomb_dropped",
-            radius_world=700.0,
-            duration_ticks=8,
-            emitter_name_col="user_name",
-            emitter_steamid_col="user_steamid",
-            detail_value="drop",
-            x_candidates=["X"],
-            y_candidates=["Y"],
-            z_candidates=["Z"],
-        ),
-        normalize_sound_source(
-            bomb_begin_plants,
-            sound_kind="bomb",
-            sound_source="bomb_beginplant",
-            radius_world=1200.0,
-            duration_ticks=12,
-            emitter_name_col="user_name",
-            emitter_steamid_col="user_steamid",
-            detail_value="begin_plant",
-        ),
-        normalize_sound_source(
-            bomb_begin_defuses,
-            sound_kind="bomb",
-            sound_source="bomb_begindefuse",
-            radius_world=1062.0,
-            duration_ticks=16,
-            emitter_name_col="user_name",
-            emitter_steamid_col="user_steamid",
-            detail_value="begin_defuse",
-        ),
-        normalize_sound_source(
-            bomb_abort_defuses,
-            sound_kind="bomb",
-            sound_source="bomb_abortdefuse",
-            radius_world=800.0,
-            duration_ticks=10,
-            emitter_name_col="user_name",
-            emitter_steamid_col="user_steamid",
-            detail_value="abort_defuse",
-        ),
-        normalize_sound_source(
-            bomb_defuses,
-            sound_kind="bomb",
-            sound_source="bomb_defused",
-            radius_world=1062.0,
-            duration_ticks=16,
-            emitter_name_col="user_name",
-            emitter_steamid_col="user_steamid",
-            detail_value="defused",
-            x_candidates=["X"],
-            y_candidates=["Y"],
-            z_candidates=["Z"],
-        ),
-        normalize_sound_source(
-            bomb_explodes,
-            sound_kind="bomb",
-            sound_source="bomb_exploded",
-            radius_world=3000.0,
-            duration_ticks=32,
-            emitter_name_col="user_name",
-            emitter_steamid_col="user_steamid",
-            detail_value="exploded",
-            x_candidates=["X"],
-            y_candidates=["Y"],
-            z_candidates=["Z"],
-        ),
-        build_movement_sound_events(ticks),
-        build_landing_sound_events(ticks),
-    ]
-    combined = pd.concat(sound_tables, ignore_index=True)
-    combined = enrich_sound_event_positions(combined, ticks)
-    combined["detail"] = combined["detail"].astype("string").fillna("")
-    combined["sound_kind"] = combined["sound_kind"].astype("string")
-    combined["sound_source"] = combined["sound_source"].astype("string")
-    combined["emitter_name"] = combined["emitter_name"].astype("string").fillna("")
-    combined["emitter_steamid"] = combined["emitter_steamid"].astype("string").fillna("")
-    if "weapon_id" in combined.columns:
-        combined["weapon_id"] = combined["weapon_id"].astype("string").fillna("")
-    if "audible_rule" in combined.columns:
-        combined["audible_rule"] = combined["audible_rule"].astype("string").fillna("")
-    if "is_global" in combined.columns:
-        combined["is_global"] = combined["is_global"].astype("boolean")
-    if "is_suppressed" in combined.columns:
-        combined["is_suppressed"] = combined["is_suppressed"].astype("boolean")
-    if "grenade_entity_id" in combined.columns:
-        combined["grenade_entity_id"] = pd.to_numeric(combined["grenade_entity_id"], errors="coerce").astype("Int64")
-    combined = combined.dropna(subset=["tick"]).copy()
-    combined["tick"] = pd.to_numeric(combined["tick"], errors="coerce").astype("int64")
-    if "inferred_round_id" in combined.columns:
-        combined["inferred_round_id"] = pd.to_numeric(combined["inferred_round_id"], errors="coerce").astype("Int64")
-        combined = combined[combined["inferred_round_id"].notna()].copy()
-        combined["inferred_round_id"] = combined["inferred_round_id"].astype("int64")
-    if "inferred_round_tick" in combined.columns:
-        combined["inferred_round_tick"] = pd.to_numeric(combined["inferred_round_tick"], errors="coerce").fillna(0).astype("int64")
-    if "inferred_round_seconds" in combined.columns:
-        combined["inferred_round_seconds"] = pd.to_numeric(combined["inferred_round_seconds"], errors="coerce")
-    combined["radius_world"] = pd.to_numeric(combined["radius_world"], errors="coerce")
-    combined["duration_ticks"] = pd.to_numeric(combined["duration_ticks"], errors="coerce").fillna(0).astype("int64")
-    combined["impact_speed_z"] = pd.to_numeric(combined["impact_speed_z"], errors="coerce")
-    combined["x"] = pd.to_numeric(combined["x"], errors="coerce")
-    combined["y"] = pd.to_numeric(combined["y"], errors="coerce")
-    combined["z"] = pd.to_numeric(combined["z"], errors="coerce")
-    combined = combined.sort_values(["tick", "sound_kind", "sound_source", "emitter_name"]).reset_index(drop=True)
-    return combined
-
-
 def build_inferred_rounds_table(ticks, jump_by_tick, round_start_ticks: list[int]):
     round_table = (
         ticks.groupby("inferred_round_id")
@@ -1918,7 +983,7 @@ def build_metadata(
     smoke_expires,
     inferno_starts,
     grenade_trajectory_segments,
-    sound_events,
+    sound_effects,
     inferred_rounds,
     jump_threshold: float,
     min_jump_players: int,
@@ -2050,9 +1115,9 @@ def build_metadata(
                 "rows": int(len(smoke_expires)),
                 "columns": list(smoke_expires.columns),
             },
-            "sound_events": {
-                "rows": int(len(sound_events)),
-                "columns": list(sound_events.columns),
+            "sound_effect": {
+                "rows": int(len(sound_effects)),
+                "columns": list(sound_effects.columns),
             },
         },
         "round_inference": {

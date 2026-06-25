@@ -6,6 +6,8 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
+from wall.domain.player import RoundPlayers
+
 
 @dataclass(frozen=True)
 class SoundStyle:
@@ -20,6 +22,7 @@ class SoundStyle:
     suppression_group: str = "default"
     center_marker_radius: int = 0
     center_marker_alpha_cap: int = 0
+    impulse_display_ticks: int = 1
 
 
 @dataclass(frozen=True)
@@ -33,15 +36,22 @@ class SoundPresentationConfig:
 
 
 @dataclass(frozen=True)
-class SoundEvent:
-    tick: int
+class SoundEffect:
+    effect_id: str
+    emitter_type: str
+    source_type: str
+    source_id: str
+    start_tick: int
     end_tick: int
-    duration_ticks: int
-    sound_kind: str
+    sound_class: str
+    sound_action: str
+    item_name: str
+    radius: float
+    position_mode: str
     x: float
     y: float
-    radius_world: float
-    emitter_key: str
+    z: float
+    raw_source: str
     style: SoundStyle
 
 
@@ -65,60 +75,104 @@ class SoundRenderEvent:
 
 
 DEFAULT_SOUND_STYLE = SoundStyle()
-SOUND_STYLE_BY_KIND: dict[str, SoundStyle] = {
-    "footstep": SoundStyle(color=(104, 214, 144), draw_priority=40, alpha_mult=1.15, ring_width=2, display_radius_mult=0.62, fill_alpha_mult=0.0),
-    "landing": SoundStyle(color=(176, 108, 48), draw_priority=30, alpha_mult=1.05, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=0.10),
-    "gunfire": SoundStyle(color=(245, 245, 245), draw_priority=10, alpha_mult=0.42, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=0.0, capped_label="MAP"),
-    "damage": SoundStyle(color=(224, 78, 78), draw_priority=25, alpha_mult=0.82, ring_width=2, display_radius_mult=0.72, fill_alpha_mult=0.08),
-    "weapon_drop": SoundStyle(color=(164, 196, 214), draw_priority=26, alpha_mult=0.70, ring_width=2, display_radius_mult=0.84, fill_alpha_mult=0.10),
-    "utility_drop": SoundStyle(color=(198, 182, 244), draw_priority=27, alpha_mult=0.76, ring_width=2, display_radius_mult=0.88, fill_alpha_mult=0.12),
-    "grenade_bounce": SoundStyle(
-        color=(188, 224, 236),
-        draw_priority=45,
-        alpha_mult=0.62,
-        ring_width=1,
-        display_radius_mult=0.72,
-        fill_alpha_mult=0.0,
-        suppress_lower_priority_same_emitter=False,
-        suppression_group="grenade_bounce",
-        center_marker_radius=1,
-        center_marker_alpha_cap=120,
-    ),
-    "utility": SoundStyle(color=(245, 245, 245), draw_priority=20, alpha_mult=0.48, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=0.0),
-    "bomb": SoundStyle(color=(244, 210, 91), draw_priority=20, alpha_mult=0.58, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=1.0),
+STYLE_BY_ACTION: dict[str, SoundStyle] = {
+    "locomotion": SoundStyle(color=(104, 214, 144), draw_priority=40, alpha_mult=1.10, ring_width=2, display_radius_mult=0.62, fill_alpha_mult=0.0),
+    "hard_step": SoundStyle(color=(176, 108, 48), draw_priority=32, alpha_mult=1.05, ring_width=2, display_radius_mult=0.82, fill_alpha_mult=0.10, impulse_display_ticks=6),
+    "gunfire": SoundStyle(color=(232, 74, 74), draw_priority=10, alpha_mult=0.42, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=0.0, capped_label="MAP", impulse_display_ticks=4),
+    "hurt": SoundStyle(color=(255, 166, 77), draw_priority=25, alpha_mult=0.82, ring_width=2, display_radius_mult=0.72, fill_alpha_mult=0.08, impulse_display_ticks=8),
+    "dropped": SoundStyle(color=(164, 196, 214), draw_priority=26, alpha_mult=0.70, ring_width=2, display_radius_mult=0.84, fill_alpha_mult=0.10, impulse_display_ticks=10),
+    "bounce": SoundStyle(color=(188, 224, 236), draw_priority=45, alpha_mult=0.62, ring_width=1, display_radius_mult=0.72, fill_alpha_mult=0.0, suppress_lower_priority_same_emitter=False, suppression_group="grenade_bounce", center_marker_radius=1, center_marker_alpha_cap=120, impulse_display_ticks=12),
+    "smoke_detonate": SoundStyle(color=(245, 245, 245), draw_priority=20, alpha_mult=0.48, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=0.0, impulse_display_ticks=10),
+    "flash_detonate": SoundStyle(color=(245, 245, 245), draw_priority=20, alpha_mult=0.48, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=0.0, impulse_display_ticks=10),
+    "he_detonate": SoundStyle(color=(245, 245, 245), draw_priority=20, alpha_mult=0.48, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=0.0, impulse_display_ticks=12),
+    "inferno_startburn": SoundStyle(color=(245, 245, 245), draw_priority=20, alpha_mult=0.48, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=0.0, impulse_display_ticks=16),
+    "begin_plant": SoundStyle(color=(244, 210, 91), draw_priority=20, alpha_mult=0.58, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=1.0, impulse_display_ticks=12),
+    "begin_defuse": SoundStyle(color=(244, 210, 91), draw_priority=20, alpha_mult=0.58, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=1.0, impulse_display_ticks=16),
+    "abort_defuse": SoundStyle(color=(244, 210, 91), draw_priority=20, alpha_mult=0.58, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=1.0, impulse_display_ticks=10),
+    "defused": SoundStyle(color=(244, 210, 91), draw_priority=20, alpha_mult=0.58, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=1.0, impulse_display_ticks=16),
+    "exploded": SoundStyle(color=(244, 210, 91), draw_priority=20, alpha_mult=0.58, ring_width=2, display_radius_mult=1.0, fill_alpha_mult=1.0, impulse_display_ticks=32),
+    "reload": SoundStyle(color=(245, 245, 245), draw_priority=18, alpha_mult=0.46, ring_width=2, display_radius_mult=0.92, fill_alpha_mult=0.0, impulse_display_ticks=8),
+    "zoom": SoundStyle(color=(245, 245, 245), draw_priority=18, alpha_mult=0.46, ring_width=2, display_radius_mult=0.92, fill_alpha_mult=0.0, impulse_display_ticks=6),
 }
 
 
+def _coerce_text(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"", "nan", "none", "<na>"}:
+        return ""
+    return text
+
+
+def _coerce_float(value: object) -> float:
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric):
+        return float("nan")
+    return float(numeric)
+
+
+def _render_key_for_effect(effect: SoundEffect) -> str:
+    if effect.sound_action == "dropped":
+        utility_items = {"smokegrenade", "flashbang", "hegrenade", "molotov", "incgrenade", "decoy"}
+        return "utility_drop" if effect.item_name in utility_items else "dropped"
+    return effect.sound_action or effect.sound_class or "unknown"
+
+
+def _style_for_effect(effect: SoundEffect) -> SoundStyle:
+    render_key = _render_key_for_effect(effect)
+    if render_key == "utility_drop":
+        return SoundStyle(color=(198, 182, 244), draw_priority=27, alpha_mult=0.76, ring_width=2, display_radius_mult=0.88, fill_alpha_mult=0.12, impulse_display_ticks=10)
+    return STYLE_BY_ACTION.get(render_key, DEFAULT_SOUND_STYLE)
+
+
+def _parse_source_id(source_id: str) -> tuple[str | None, str | None]:
+    if not source_id:
+        return None, None
+    if source_id.startswith("name:"):
+        return None, source_id.split(":", 1)[1]
+    return source_id, None
+
+
 class SoundTimeline:
-    def __init__(self, round_sound_events: pd.DataFrame) -> None:
-        sorted_events = round_sound_events.sort_values(["tick", "sound_kind"]).copy() if not round_sound_events.empty else round_sound_events.copy()
-        self.events = self._build_events(sorted_events)
+    def __init__(self, round_sound_effects: pd.DataFrame) -> None:
+        sorted_effects = (
+            round_sound_effects.sort_values(["start_tick", "end_tick", "sound_class", "sound_action"]).copy()
+            if not round_sound_effects.empty
+            else round_sound_effects.copy()
+        )
+        self.effects = self._build_effects(sorted_effects)
 
     def has_events(self) -> bool:
-        return bool(self.events)
+        return bool(self.effects)
 
     def present_events_at(
         self,
         frame_tick: int,
         *,
+        round_players: RoundPlayers | None,
         world_to_px: Callable[[float, float], tuple[float, float]],
         world_dist_to_px: Callable[[float], float],
         viewport_width: int,
         viewport_height: int,
         presentation: SoundPresentationConfig,
     ) -> list[SoundRenderEvent]:
-        if not self.events:
+        if not self.effects:
             return []
-        # IMPORTANT: viewer passes one presentation config object so sound semantics
-        # stay centralized in domain and new call sites do not rebuild rule bundles ad hoc.
         max_radius_px = max(24.0, min(viewport_width, viewport_height) * presentation.max_display_radius_ratio)
         candidates: list[SoundRenderEvent] = []
-        for event in self.events:
-            if frame_tick < event.tick or frame_tick >= event.end_tick:
+        for effect in self.effects:
+            active_start, active_end = self._active_window_for(effect)
+            if frame_tick < active_start or frame_tick > active_end:
+                continue
+            position = self.resolve_sound_effect_position(effect, tick=frame_tick, round_players=round_players)
+            if position is None:
                 continue
             visual_state = self._visual_state_at(
-                event,
+                effect,
                 frame_tick=frame_tick,
+                active_start_tick=active_start,
+                active_end_tick=active_end,
                 world_dist_to_px=world_dist_to_px,
                 max_radius_px=max_radius_px,
                 base_alpha=presentation.base_alpha,
@@ -129,24 +183,24 @@ class SoundTimeline:
             if visual_state is None:
                 continue
             radius_px, alpha, ring_width, is_capped, label = visual_state
-            center_px = world_to_px(event.x, event.y)
+            center_px = world_to_px(position[0], position[1])
             candidates.append(
                 SoundRenderEvent(
-                    sound_kind=event.sound_kind,
+                    sound_kind=_render_key_for_effect(effect),
                     center_px=center_px,
-                    color=event.style.color,
+                    color=effect.style.color,
                     radius_px=radius_px,
                     alpha=alpha,
                     ring_width=ring_width,
-                    fill_alpha_mult=event.style.fill_alpha_mult,
+                    fill_alpha_mult=effect.style.fill_alpha_mult,
                     is_capped=is_capped,
                     label=label,
-                    emitter_key=event.emitter_key,
-                    draw_priority=event.style.draw_priority,
-                    suppression_group=event.style.suppression_group,
-                    suppress_lower_priority_same_emitter=event.style.suppress_lower_priority_same_emitter,
-                    center_marker_radius=event.style.center_marker_radius,
-                    center_marker_alpha_cap=event.style.center_marker_alpha_cap,
+                    emitter_key=self._emitter_key(effect),
+                    draw_priority=effect.style.draw_priority,
+                    suppression_group=effect.style.suppression_group,
+                    suppress_lower_priority_same_emitter=effect.style.suppress_lower_priority_same_emitter,
+                    center_marker_radius=effect.style.center_marker_radius,
+                    center_marker_alpha_cap=effect.style.center_marker_alpha_cap,
                 )
             )
         if not candidates:
@@ -154,52 +208,78 @@ class SoundTimeline:
         candidates.sort(key=lambda item: (item.draw_priority, item.radius_px, item.sound_kind))
         return self._suppress_same_emitter_rings(candidates, suppression_distance_px=presentation.suppression_distance_px)
 
-    def _build_events(self, round_sound_events: pd.DataFrame) -> list[SoundEvent]:
-        if round_sound_events.empty:
-            return []
-        events: list[SoundEvent] = []
-        for sound in round_sound_events.itertuples(index=False):
-            x = pd.to_numeric(getattr(sound, "x", np.nan), errors="coerce")
-            y = pd.to_numeric(getattr(sound, "y", np.nan), errors="coerce")
-            radius_world = pd.to_numeric(getattr(sound, "radius_world", np.nan), errors="coerce")
-            tick = pd.to_numeric(getattr(sound, "tick", np.nan), errors="coerce")
-            duration_ticks = pd.to_numeric(getattr(sound, "duration_ticks", 1), errors="coerce")
-            if pd.isna(x) or pd.isna(y) or pd.isna(radius_world) or pd.isna(tick):
-                continue
-            normalized_duration = max(1, int(duration_ticks)) if pd.notna(duration_ticks) else 1
-            sound_kind = str(getattr(sound, "sound_kind", "") or "")
-            events.append(
-                SoundEvent(
-                    tick=int(tick),
-                    end_tick=int(tick) + normalized_duration,
-                    duration_ticks=normalized_duration,
-                    sound_kind=sound_kind,
-                    x=float(x),
-                    y=float(y),
-                    radius_world=float(radius_world),
-                    emitter_key=self._emitter_key(sound),
-                    style=SOUND_STYLE_BY_KIND.get(sound_kind, DEFAULT_SOUND_STYLE),
-                )
-            )
-        return events
+    def resolve_sound_effect_position(
+        self,
+        effect: SoundEffect,
+        *,
+        tick: int,
+        round_players: RoundPlayers | None,
+    ) -> tuple[float, float, float] | None:
+        if effect.position_mode == "event_snapshot":
+            if np.isnan(effect.x) or np.isnan(effect.y):
+                return None
+            return (effect.x, effect.y, effect.z)
+        if effect.position_mode == "entity_at_tick":
+            if effect.source_type != "player" or round_players is None:
+                return None
+            steamid, name = _parse_source_id(effect.source_id)
+            frame = round_players.frame_at(steamid=steamid, name=name, tick=tick)
+            if frame is None:
+                return None
+            return (frame.x, frame.y, frame.z)
+        return None
 
-    def _emitter_key(self, sound) -> str:
-        grenade_entity_id = pd.to_numeric(getattr(sound, "grenade_entity_id", np.nan), errors="coerce")
-        if pd.notna(grenade_entity_id):
-            return f"grenade:{int(grenade_entity_id)}"
-        steamid = str(getattr(sound, "emitter_steamid", "") or "").strip()
-        if steamid and steamid.lower() != "nan":
-            return f"steamid:{steamid}"
-        name = str(getattr(sound, "emitter_name", "") or "").strip()
-        if name and name.lower() != "nan":
-            return f"name:{name}"
+    def _build_effects(self, round_sound_effects: pd.DataFrame) -> list[SoundEffect]:
+        if round_sound_effects.empty:
+            return []
+        effects: list[SoundEffect] = []
+        for row in round_sound_effects.itertuples(index=False):
+            start_tick = pd.to_numeric(getattr(row, "start_tick", np.nan), errors="coerce")
+            end_tick = pd.to_numeric(getattr(row, "end_tick", np.nan), errors="coerce")
+            radius = pd.to_numeric(getattr(row, "radius", np.nan), errors="coerce")
+            if pd.isna(start_tick) or pd.isna(end_tick) or pd.isna(radius):
+                continue
+            effect = SoundEffect(
+                effect_id=_coerce_text(getattr(row, "effect_id", "")),
+                emitter_type=_coerce_text(getattr(row, "emitter_type", "")),
+                source_type=_coerce_text(getattr(row, "source_type", "")),
+                source_id=_coerce_text(getattr(row, "source_id", "")),
+                start_tick=int(start_tick),
+                end_tick=int(end_tick),
+                sound_class=_coerce_text(getattr(row, "sound_class", "")),
+                sound_action=_coerce_text(getattr(row, "sound_action", "")),
+                item_name=_coerce_text(getattr(row, "item_name", "")),
+                radius=float(radius),
+                position_mode=_coerce_text(getattr(row, "position_mode", "")),
+                x=_coerce_float(getattr(row, "x", np.nan)),
+                y=_coerce_float(getattr(row, "y", np.nan)),
+                z=_coerce_float(getattr(row, "z", np.nan)),
+                raw_source=_coerce_text(getattr(row, "raw_source", "")),
+                style=DEFAULT_SOUND_STYLE,
+            )
+            effects.append(effect.__class__(**{**effect.__dict__, "style": _style_for_effect(effect)}))
+        return effects
+
+    def _emitter_key(self, effect: SoundEffect) -> str:
+        if effect.source_type and effect.source_id:
+            return f"{effect.source_type}:{effect.source_id}"
+        if effect.effect_id:
+            return effect.effect_id
         return ""
+
+    def _active_window_for(self, effect: SoundEffect) -> tuple[int, int]:
+        if effect.emitter_type == "continuous":
+            return effect.start_tick, effect.end_tick
+        impulse_ticks = max(1, int(effect.style.impulse_display_ticks))
+        return effect.start_tick, effect.start_tick + impulse_ticks - 1
 
     def _visual_state_at(
         self,
-        event: SoundEvent,
+        effect: SoundEffect,
         *,
         frame_tick: int,
+        active_start_tick: int,
+        active_end_tick: int,
         world_dist_to_px: Callable[[float], float],
         max_radius_px: float,
         base_alpha: int,
@@ -207,8 +287,8 @@ class SoundTimeline:
         start_expand_ticks: int,
         end_shrink_ticks: int,
     ) -> tuple[int, int, int, bool, str | None] | None:
-        elapsed = frame_tick - event.tick
-        duration_ticks = event.duration_ticks
+        elapsed = frame_tick - active_start_tick
+        duration_ticks = max(1, active_end_tick - active_start_tick + 1)
         fade_in_ticks = max(1, min(start_expand_ticks, duration_ticks))
         fade_out_ticks = max(1, min(end_shrink_ticks, duration_ticks))
         alpha_scale = 1.0
@@ -217,26 +297,22 @@ class SoundTimeline:
         remaining = duration_ticks - elapsed
         if remaining <= fade_out_ticks:
             alpha_scale = min(alpha_scale, max(0.0, remaining / fade_out_ticks))
-
         scale = 1.0
         if elapsed < fade_in_ticks:
-            t = (elapsed + 1) / fade_in_ticks
-            scale = 0.92 + 0.08 * t
+            scale = 0.92 + 0.08 * ((elapsed + 1) / fade_in_ticks)
         elif remaining <= fade_out_ticks:
-            t = max(0.0, remaining / fade_out_ticks)
-            scale = 0.96 + 0.04 * t
-
-        raw_radius_px = world_dist_to_px(event.radius_world) * scale
+            scale = 0.96 + 0.04 * max(0.0, remaining / fade_out_ticks)
+        raw_radius_px = world_dist_to_px(effect.radius) * scale
         is_capped = raw_radius_px > max_radius_px
-        radius_px = int(round(min(raw_radius_px, max_radius_px) * event.style.display_radius_mult))
+        radius_px = int(round(min(raw_radius_px, max_radius_px) * effect.style.display_radius_mult))
         if radius_px < 4:
             return None
         resolved_base_alpha = base_alpha + (global_alpha_boost if is_capped else 0)
-        alpha = max(0, min(255, int(round(resolved_base_alpha * alpha_scale * event.style.alpha_mult))))
+        alpha = max(0, min(255, int(round(resolved_base_alpha * alpha_scale * effect.style.alpha_mult))))
         if alpha <= 0:
             return None
-        ring_width = int(event.style.ring_width) + (1 if is_capped else 0)
-        label = event.style.capped_label if is_capped else None
+        ring_width = int(effect.style.ring_width) + (1 if is_capped else 0)
+        label = effect.style.capped_label if is_capped else None
         return radius_px, alpha, ring_width, is_capped, label
 
     def _suppress_same_emitter_rings(
@@ -259,9 +335,7 @@ class SoundTimeline:
         *,
         suppression_distance_px: float,
     ) -> bool:
-        if not candidate.emitter_key:
-            return False
-        if not candidate.suppress_lower_priority_same_emitter:
+        if not candidate.emitter_key or not candidate.suppress_lower_priority_same_emitter:
             return False
         for existing in kept:
             if not existing.suppress_lower_priority_same_emitter:

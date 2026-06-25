@@ -332,7 +332,23 @@ class DatasetIndex:
             grenade_trajectory_segments = grenade_trajectory_segments[
                 pd.to_numeric(grenade_trajectory_segments["round_id"], errors="coerce") == int(round_id)
             ].copy()
-        sound_events = _read_round_scoped_table(self.data_dir, "sound_events", round_id=round_id)
+        sound_effects = _read_round_scoped_table(
+            self.data_dir,
+            "sound_effect",
+            round_id=round_id,
+            require_round_columns=False,
+        )
+        if sound_effects.empty:
+            # Legacy dataset fallback during sound-effect migration.
+            sound_effects = _read_round_scoped_table(
+                self.data_dir,
+                "sound_events",
+                round_id=round_id,
+            )
+        elif "round_id" in sound_effects.columns:
+            sound_effects = sound_effects[
+                pd.to_numeric(sound_effects["round_id"], errors="coerce") == int(round_id)
+            ].copy()
         round_data = get_round_data(
             ticks=ticks,
             deaths=deaths,
@@ -354,7 +370,7 @@ class DatasetIndex:
             bomb_explodes=bomb_explodes,
             smoke_expires=smoke_expires,
             inferno_starts=inferno_starts,
-            sound_events=sound_events,
+            sound_effects=sound_effects,
             inferred_rounds=self.inferred_rounds,
             round_id=round_id,
             tickrate=tickrate,

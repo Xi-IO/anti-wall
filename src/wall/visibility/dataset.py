@@ -33,7 +33,7 @@ class MatchDataset:
     smoke_expires: pd.DataFrame
     inferno_starts: pd.DataFrame
     grenade_trajectory_segments: pd.DataFrame
-    sound_events: pd.DataFrame
+    sound_effects: pd.DataFrame
     inferred_rounds: pd.DataFrame
     metadata: dict
 
@@ -82,7 +82,7 @@ class MatchDataset:
             self.bomb_explodes,
             self.smoke_expires,
             self.inferno_starts,
-            self.sound_events,
+            self.sound_effects,
             self.inferred_rounds,
             round_id,
             tickrate=tickrate,
