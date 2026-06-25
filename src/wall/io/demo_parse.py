@@ -10,8 +10,10 @@ from demoparser2 import DemoParser
 
 from wall.domain.weapon_overrides import WEAPON_OVERRIDES
 from wall.domain.weapons import find_weapon_spec, load_base_weapon_specs, merge_weapon_specs
+from wall.io.grenade_segments import build_grenade_trajectory_segments_table
 from wall.io.table_io import DEFAULT_TABLE_FORMAT, write_table
 from wall.output import progress_enabled, print_status
+from wall.profile import profile_log, profile_note
 
 
 WEAPON_SPECS = merge_weapon_specs(load_base_weapon_specs(), WEAPON_OVERRIDES)
@@ -31,6 +33,13 @@ def _print_parse_progress(current: int, total: int, detail: str) -> None:
     if not progress_enabled():
         return
     print(_render_progress_line("parsing", current, total, detail=detail), flush=True)
+
+
+def _remove_legacy_grenade_tables(output_dir: Path) -> None:
+    for suffix in (".parquet", ".csv"):
+        legacy_path = output_dir / f"grenades{suffix}"
+        if legacy_path.exists():
+            legacy_path.unlink()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -256,11 +265,13 @@ def main(argv: list[str] | None = None) -> None:
         bomb_explodes=bomb_explodes,
     )
     inferred_rounds = build_inferred_rounds_table(ticks, jump_by_tick, round_start_ticks)
+    grenade_trajectory_segments = build_grenade_trajectory_segments_table(grenades, tickrate=64.0)
     table_format = args.table_format
     ticks_format = args.ticks_format or table_format
 
     output_dir = args.output_dir / args.demo.stem
     output_dir.mkdir(parents=True, exist_ok=True)
+    _remove_legacy_grenade_tables(output_dir)
     _print_parse_progress(5, total_stages, f"Writing dataset {output_dir}")
 
     metadata_json = output_dir / "metadata.json"
@@ -288,11 +299,24 @@ def main(argv: list[str] | None = None) -> None:
         "bomb_exploded": write_table(bomb_explodes, output_dir, "bomb_exploded", table_format),
         "smokegrenade_expired": write_table(smoke_expires, output_dir, "smokegrenade_expired", table_format),
         "inferno_startburn": write_table(inferno_starts, output_dir, "inferno_startburn", table_format),
-        "grenades": write_table(grenades, output_dir, "grenades", table_format),
+        "grenade_trajectory_segments": write_table(
+            grenade_trajectory_segments,
+            output_dir,
+            "grenade_trajectory_segments",
+            table_format,
+        ),
         "sound_events": write_table(sound_events, output_dir, "sound_events", table_format),
         "ticks": write_table(ticks, output_dir, "ticks", ticks_format),
         "inferred_rounds": write_table(inferred_rounds, output_dir, "inferred_rounds", table_format),
     }
+    profile_log(
+        "grenade_segments.write",
+        df=grenade_trajectory_segments,
+        note=profile_note(
+            f"output={saved_paths['grenade_trajectory_segments']}",
+            f"rows={len(grenade_trajectory_segments)}",
+        ),
+    )
     metadata = build_metadata(
         demo_path=args.demo,
         header=header,
@@ -320,7 +344,7 @@ def main(argv: list[str] | None = None) -> None:
         bomb_explodes=bomb_explodes,
         smoke_expires=smoke_expires,
         inferno_starts=inferno_starts,
-        grenades=grenades,
+        grenade_trajectory_segments=grenade_trajectory_segments,
         sound_events=sound_events,
         inferred_rounds=inferred_rounds,
         jump_threshold=args.jump_threshold,
@@ -1893,7 +1917,7 @@ def build_metadata(
     bomb_explodes,
     smoke_expires,
     inferno_starts,
-    grenades,
+    grenade_trajectory_segments,
     sound_events,
     inferred_rounds,
     jump_threshold: float,
@@ -1966,9 +1990,9 @@ def build_metadata(
                 "rows": int(len(inferred_rounds)),
                 "columns": list(inferred_rounds.columns),
             },
-            "grenades": {
-                "rows": int(len(grenades)),
-                "columns": list(grenades.columns),
+            "grenade_trajectory_segments": {
+                "rows": int(len(grenade_trajectory_segments)),
+                "columns": list(grenade_trajectory_segments.columns),
             },
             "inferno_startburn": {
                 "rows": int(len(inferno_starts)),

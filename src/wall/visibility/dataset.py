@@ -32,7 +32,7 @@ class MatchDataset:
     bomb_explodes: pd.DataFrame
     smoke_expires: pd.DataFrame
     inferno_starts: pd.DataFrame
-    grenades: pd.DataFrame
+    grenade_trajectory_segments: pd.DataFrame
     sound_events: pd.DataFrame
     inferred_rounds: pd.DataFrame
     metadata: dict
@@ -82,7 +82,6 @@ class MatchDataset:
             self.bomb_explodes,
             self.smoke_expires,
             self.inferno_starts,
-            self.grenades,
             self.sound_events,
             self.inferred_rounds,
             round_id,
@@ -90,6 +89,7 @@ class MatchDataset:
             map_name=self.map_name,
             visibility_profile=visibility_profile,
             visibility_checker=None if context is None else context.visibility_checker,
+            grenade_trajectory_segments=self.grenade_trajectory_segments,
         )
 
     def build_demo_hud_numbers(self) -> dict[str, int]:

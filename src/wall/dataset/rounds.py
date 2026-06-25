@@ -57,7 +57,10 @@ def load_round_data(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
     bomb_explodes, bomb_explodes_label = read_table_with_fallback(data_dir, "bomb_exploded")
     smoke_expires, smoke_expires_label = read_table_with_fallback(data_dir, "smokegrenade_expired")
     inferno_starts, inferno_starts_label = read_table_with_fallback(data_dir, "inferno_startburn")
-    grenades, grenades_label = read_table_with_fallback(data_dir, "grenades")
+    grenade_trajectory_segments, grenade_trajectory_segments_label = read_table_with_fallback(
+        data_dir,
+        "grenade_trajectory_segments",
+    )
     sound_events, sound_events_label = read_table_with_fallback(data_dir, "sound_events")
     inferred_rounds, inferred_rounds_label = read_table_with_fallback(data_dir, "inferred_rounds", required=True)
     metadata_path = data_dir / "metadata.json"
@@ -100,12 +103,14 @@ def load_round_data(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
         require_round_time_columns(smoke_expires, smoke_expires_label)
     if not inferno_starts.empty:
         require_round_time_columns(inferno_starts, inferno_starts_label)
-    if not grenades.empty:
-        require_round_time_columns(grenades, grenades_label)
+    if not grenade_trajectory_segments.empty:
+        require_column(grenade_trajectory_segments, "round_id", grenade_trajectory_segments_label)
+        require_column(grenade_trajectory_segments, "start_tick", grenade_trajectory_segments_label)
+        require_column(grenade_trajectory_segments, "end_tick", grenade_trajectory_segments_label)
     if not sound_events.empty:
         require_round_time_columns(sound_events, sound_events_label)
     require_column(inferred_rounds, "inferred_round_id", inferred_rounds_label)
-    return ticks, deaths, fires, hurts, hits, footsteps, smoke_detonates, flash_detonates, he_detonates, blinds, bomb_pickups, bomb_drops, bomb_begin_plants, bomb_plants, bomb_defuses, bomb_begin_defuses, bomb_abort_defuses, bomb_explodes, smoke_expires, inferno_starts, grenades, sound_events, inferred_rounds, metadata
+    return ticks, deaths, fires, hurts, hits, footsteps, smoke_detonates, flash_detonates, he_detonates, blinds, bomb_pickups, bomb_drops, bomb_begin_plants, bomb_plants, bomb_defuses, bomb_begin_defuses, bomb_abort_defuses, bomb_explodes, smoke_expires, inferno_starts, grenade_trajectory_segments, sound_events, inferred_rounds, metadata
 
 
 @dataclass
@@ -166,7 +171,6 @@ def get_round_data(
     bomb_explodes: pd.DataFrame,
     smoke_expires: pd.DataFrame,
     inferno_starts: pd.DataFrame,
-    grenades: pd.DataFrame,
     sound_events: pd.DataFrame,
     inferred_rounds: pd.DataFrame,
     round_id: int,
@@ -174,6 +178,7 @@ def get_round_data(
     map_name: str | None = None,
     visibility_profile: VisibilityProfile | None = None,
     visibility_checker=None,
+    grenade_trajectory_segments: pd.DataFrame | None = None,
 ) -> RoundData:
     round_lookup_started_at = time.perf_counter()
     round_ticks = _slice_round_table(ticks, round_id)
@@ -194,7 +199,12 @@ def get_round_data(
     round_bomb_explodes = _slice_round_table(bomb_explodes, round_id) if not bomb_explodes.empty else pd.DataFrame()
     round_smoke_expires = _slice_round_table(smoke_expires, round_id) if not smoke_expires.empty else pd.DataFrame()
     round_inferno_starts = _slice_round_table(inferno_starts, round_id) if not inferno_starts.empty else pd.DataFrame()
-    round_grenades = _slice_round_table(grenades, round_id) if not grenades.empty else pd.DataFrame()
+    grenade_segments_source = pd.DataFrame() if grenade_trajectory_segments is None else grenade_trajectory_segments
+    round_grenade_trajectory_segments = (
+        grenade_segments_source[grenade_segments_source["round_id"] == int(round_id)].copy()
+        if not grenade_segments_source.empty and "round_id" in grenade_segments_source.columns
+        else pd.DataFrame()
+    )
     round_sound_events = _slice_round_table(sound_events, round_id) if not sound_events.empty else pd.DataFrame()
     round_info = inferred_rounds[inferred_rounds["inferred_round_id"] == round_id].copy() if not inferred_rounds.empty else pd.DataFrame()
     if visibility_profile is not None:
@@ -211,7 +221,10 @@ def get_round_data(
     round_flash_detonates = _sort_if_needed(round_flash_detonates, ["tick"])
     round_he_detonates = _sort_if_needed(round_he_detonates, ["tick"])
     round_inferno_starts = _sort_if_needed(round_inferno_starts, ["tick"])
-    round_grenades = _sort_if_needed(round_grenades, ["grenade_entity_id", "tick"])
+    round_grenade_trajectory_segments = _sort_if_needed(
+        round_grenade_trajectory_segments,
+        ["grenade_id", "segment_index", "start_tick"],
+    )
     round_sound_events = _sort_if_needed(round_sound_events, ["tick", "sound_kind"])
     profile_log(
         "round_data.slice",
@@ -253,7 +266,7 @@ def get_round_data(
         round_flash_detonates=round_flash_detonates,
         round_he_detonates=round_he_detonates,
         round_inferno_starts=round_inferno_starts,
-        round_grenades=round_grenades,
+        round_grenade_trajectory_segments=round_grenade_trajectory_segments,
         flash_effect_ticks=FLASH_EFFECT_TICKS,
         he_effect_ticks=HE_EFFECT_TICKS,
         inferno_duration_ticks=int(round(tickrate * INFERNO_DURATION_SECONDS)),

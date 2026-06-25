@@ -144,6 +144,71 @@ class DatasetIndexTests(unittest.TestCase):
         self.assertEqual(ticks_df["inferred_round_id"].astype(int).unique().tolist(), [2])
         self.assertEqual(ticks_df["tick"].astype(int).tolist(), [200])
 
+    def test_build_round_data_uses_segment_artifact_without_grenades_table(self) -> None:
+        data_dir = make_test_dir()
+        pd.DataFrame([{"inferred_round_id": 1, "start_tick": 100, "end_tick": 102}]).to_parquet(
+            data_dir / "inferred_rounds.parquet",
+            index=False,
+        )
+        pd.DataFrame(
+            [
+                {
+                    "tick": 100,
+                    "inferred_round_id": 1,
+                    "inferred_round_tick": 0,
+                    "inferred_round_seconds": 0.0,
+                    "name": "p1",
+                    "steamid": "1",
+                    "active_weapon_name": "ak47",
+                    "has_defuser": 0,
+                    "X": 1.0,
+                    "Y": 2.0,
+                    "Z": 3.0,
+                    "yaw": 90.0,
+                    "pitch": 0.0,
+                    "team_num": 2,
+                    "health": 100,
+                    "ducking": 0,
+                    "is_airborne": 0,
+                    "velocity_X": 0.0,
+                    "velocity_Y": 0.0,
+                    "velocity_Z": 0.0,
+                }
+            ]
+        ).to_parquet(data_dir / "ticks.parquet", index=False)
+        pd.DataFrame(
+            [{"tick": 100, "inferred_round_id": 1, "inferred_round_tick": 0, "inferred_round_seconds": 0.0, "user_name": "p1"}]
+        ).to_parquet(data_dir / "player_death.parquet", index=False)
+        pd.DataFrame(
+            [
+                {
+                    "round_id": 1,
+                    "grenade_id": "7",
+                    "grenade_type": "CSmokeGrenadeProjectile",
+                    "segment_index": 0,
+                    "start_tick": 100,
+                    "end_tick": 102,
+                    "start_x": 0.0,
+                    "start_y": 0.0,
+                    "start_z": 0.0,
+                    "end_x": 10.0,
+                    "end_y": 10.0,
+                    "end_z": 0.0,
+                }
+            ]
+        ).to_parquet(data_dir / "grenade_trajectory_segments.parquet", index=False)
+
+        index = DatasetIndex.from_data_dir(data_dir)
+
+        with patch("wall.dataset.index.get_round_data") as get_round_data:
+            get_round_data.return_value = "round-data"
+            result = index.build_round_data(1, tickrate=64.0)
+
+        self.assertEqual(result, "round-data")
+        self.assertNotIn("grenades", index.table_paths)
+        segments_df = get_round_data.call_args.kwargs["grenade_trajectory_segments"]
+        self.assertEqual(segments_df["grenade_id"].tolist(), ["7"])
+
     def test_build_demo_hud_numbers_reads_only_requested_round(self) -> None:
         data_dir = make_test_dir()
         pd.DataFrame(

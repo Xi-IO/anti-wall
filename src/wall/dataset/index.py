@@ -322,7 +322,16 @@ class DatasetIndex:
         bomb_explodes = _read_round_scoped_table(self.data_dir, "bomb_exploded", round_id=round_id)
         smoke_expires = _read_round_scoped_table(self.data_dir, "smokegrenade_expired", round_id=round_id)
         inferno_starts = _read_round_scoped_table(self.data_dir, "inferno_startburn", round_id=round_id)
-        grenades = _read_round_scoped_table(self.data_dir, "grenades", round_id=round_id)
+        grenade_trajectory_segments = _read_round_scoped_table(
+            self.data_dir,
+            "grenade_trajectory_segments",
+            round_id=round_id,
+            require_round_columns=False,
+        )
+        if not grenade_trajectory_segments.empty and "round_id" in grenade_trajectory_segments.columns:
+            grenade_trajectory_segments = grenade_trajectory_segments[
+                pd.to_numeric(grenade_trajectory_segments["round_id"], errors="coerce") == int(round_id)
+            ].copy()
         sound_events = _read_round_scoped_table(self.data_dir, "sound_events", round_id=round_id)
         round_data = get_round_data(
             ticks=ticks,
@@ -345,7 +354,6 @@ class DatasetIndex:
             bomb_explodes=bomb_explodes,
             smoke_expires=smoke_expires,
             inferno_starts=inferno_starts,
-            grenades=grenades,
             sound_events=sound_events,
             inferred_rounds=self.inferred_rounds,
             round_id=round_id,
@@ -353,6 +361,7 @@ class DatasetIndex:
             map_name=self.map_name,
             visibility_profile=visibility_profile,
             visibility_checker=None if context is None else context.visibility_checker,
+            grenade_trajectory_segments=grenade_trajectory_segments,
         )
         if hasattr(round_data, "round_ticks"):
             profile_log(

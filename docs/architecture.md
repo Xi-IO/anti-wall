@@ -54,12 +54,20 @@ demo file
 - 调用 demo parser
 - 清洗并输出标准 dataset
 - 维护表读写和 catalog 能力
+- 对高频逐 tick 轨迹做压缩 artifact 生成
 
 边界：
 
 - 面向原始表和落盘格式
 - 不承担 viewer UI 逻辑
 - 只做必要的数据整理，不做播放器特化绘制
+
+当前投掷物轨迹约定：
+
+- parse 过程中可以短暂保留 parser 返回的 raw grenade trajectory DataFrame
+- 这份 raw trajectory 主要用于生成 `grenade_trajectory_segments.parquet`，以及辅助构建 grenade bounce sound events
+- 正式 dataset artifact 不再默认写出旧的 `grenades.parquet`
+- viewer 不再依赖 raw grenade trajectory artifact
 
 ### 3. Domain layer
 
@@ -294,6 +302,16 @@ dataset
   -> renderer
 ```
 
+viewer 投掷物轨迹路径：
+
+```text
+demo.parse_grenades() raw trajectory
+  -> grenade_trajectory_segments.parquet
+  -> DatasetIndex / MatchDataset
+  -> RoundData.utility_timeline
+  -> renderer grenade animation
+```
+
 viewer sidebar feed 路径：
 
 ```text
@@ -337,6 +355,12 @@ viewer 当前应优先消费：
 - `round_start_tick`
 
 而不是重新在 viewer 内部直接过滤原始表。
+
+其中投掷物轨迹的正式 viewer 输入应为：
+
+- `grenade_trajectory_segments.parquet`
+- `UtilityTimeline` 基于 segment 做 tick 内插值
+- viewer 不再回退到旧的 raw grenade trajectory artifact
 
 但 sidebar 的 visibility feed 例外地直接消费 precomputed artifact：
 
@@ -474,6 +498,9 @@ Awpy 的 `maps / navs / tris` 视为运行时外部资产：
 - visibility reconstruction 已独立到 `src/wall/visibility/`，并保持统一的 `VisibilityResultSet -> writer` 路径
 - 普通 viewer 已与默认 `awpy.VisibilityChecker` / geometry cache 初始化解耦
 - `visibility.parquet` 已成为 parse 后默认生成的 canonical interval visibility artifact
+- `grenade_trajectory_segments.parquet` 已成为正式投掷物轨迹 artifact
+- viewer 投掷物动画已切到 segment artifact，不再消费旧 `grenades.parquet`
+- parse 输出已停止写出旧的 `grenades.parquet/csv`，仅在 parse 进程内短暂保留 raw trajectory 供压缩和声音事件构建使用
 - viewer sidebar 已切到 visibility event feed，不再显示旧的 round overview / per-player info 面板
 - visibility event feed 已收口到 `viewer/info_events.py`，并只消费 interval visibility schema
 - Players 列表已支持按内部稳定 key 选中，并以 alias fallback 兼容缺少 steamid 的 visibility artifact

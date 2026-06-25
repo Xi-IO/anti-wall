@@ -60,7 +60,7 @@ class InfernoEffect:
 
 @dataclass(frozen=True)
 class GrenadeTrail:
-    points: tuple["GrenadeTrailPoint", ...]
+    segments: tuple["GrenadeTrailSegment", ...]
     grenade_type: str
     burn_icon_path: str | None
     did_burn: bool
@@ -69,19 +69,20 @@ class GrenadeTrail:
     he_burst_start_tick: int | None = None
 
     def point_at_tick(self, frame_tick: int) -> "GrenadeTrailPoint | None":
-        for point in reversed(self.points):
-            if point.tick == frame_tick:
+        for segment in self.segments:
+            point = segment.point_at_tick(frame_tick)
+            if point is not None:
                 return point
-            if point.tick < frame_tick:
-                break
         return None
 
     def recent_points_at(self, frame_tick: int, recent_window_ticks: int) -> list["GrenadeTrailPoint"]:
-        return [
-            point
-            for point in self.points
-            if frame_tick - recent_window_ticks <= point.tick <= frame_tick
-        ]
+        recent_points: list[GrenadeTrailPoint] = []
+        start_tick = max(0, int(frame_tick) - int(recent_window_ticks))
+        for tick in range(start_tick, int(frame_tick) + 1):
+            point = self.point_at_tick(tick)
+            if point is not None:
+                recent_points.append(point)
+        return recent_points
 
     def should_hide_at(self, frame_tick: int, smoke_deploy_ticks: int) -> bool:
         if self.grenade_type == "CSmokeGrenadeProjectile":
@@ -99,6 +100,36 @@ class GrenadeTrailPoint:
     x: float
     y: float
     z: float
+
+
+@dataclass(frozen=True)
+class GrenadeTrailSegment:
+    start_tick: int
+    end_tick: int
+    start_x: float
+    start_y: float
+    start_z: float
+    end_x: float
+    end_y: float
+    end_z: float
+
+    def point_at_tick(self, frame_tick: int) -> GrenadeTrailPoint | None:
+        if frame_tick < self.start_tick or frame_tick > self.end_tick:
+            return None
+        if self.end_tick <= self.start_tick:
+            return GrenadeTrailPoint(
+                tick=int(frame_tick),
+                x=float(self.start_x),
+                y=float(self.start_y),
+                z=float(self.start_z),
+            )
+        alpha = (int(frame_tick) - int(self.start_tick)) / (int(self.end_tick) - int(self.start_tick))
+        return GrenadeTrailPoint(
+            tick=int(frame_tick),
+            x=float(self.start_x + alpha * (self.end_x - self.start_x)),
+            y=float(self.start_y + alpha * (self.end_y - self.start_y)),
+            z=float(self.start_z + alpha * (self.end_z - self.start_z)),
+        )
 
 
 @dataclass(frozen=True)
@@ -125,7 +156,7 @@ class UtilityTimeline:
         round_flash_detonates: pd.DataFrame,
         round_he_detonates: pd.DataFrame,
         round_inferno_starts: pd.DataFrame,
-        round_grenades: pd.DataFrame,
+        round_grenade_trajectory_segments: pd.DataFrame,
         flash_effect_ticks: int,
         he_effect_ticks: int,
         inferno_duration_ticks: int,
@@ -140,7 +171,11 @@ class UtilityTimeline:
         self.round_flash_detonates = round_flash_detonates.sort_values(["tick"]).copy() if not round_flash_detonates.empty else round_flash_detonates.copy()
         self.round_he_detonates = round_he_detonates.sort_values(["tick"]).copy() if not round_he_detonates.empty else round_he_detonates.copy()
         self.round_inferno_starts = round_inferno_starts.sort_values(["tick"]).copy() if not round_inferno_starts.empty else round_inferno_starts.copy()
-        self.round_grenades = round_grenades.sort_values(["grenade_entity_id", "tick"]).copy() if not round_grenades.empty else round_grenades.copy()
+        self.round_grenade_trajectory_segments = (
+            round_grenade_trajectory_segments.sort_values(["grenade_id", "segment_index"]).copy()
+            if not round_grenade_trajectory_segments.empty
+            else round_grenade_trajectory_segments.copy()
+        )
         self.flash_effect_ticks = int(flash_effect_ticks)
         self.he_effect_ticks = int(he_effect_ticks)
         self.inferno_duration_ticks = int(inferno_duration_ticks)
@@ -505,59 +540,75 @@ class UtilityTimeline:
         return close.iloc[0]
 
     def _build_grenade_trails(self) -> list[GrenadeTrail]:
-        if self.round_grenades.empty:
+        return self._build_grenade_trails_from_segments()
+
+    def _build_grenade_trails_from_segments(self) -> list[GrenadeTrail]:
+        if self.round_grenade_trajectory_segments.empty:
             return []
-        required = {"grenade_type", "grenade_entity_id", "x", "y", "z", "tick"}
-        if not required.issubset(self.round_grenades.columns):
+        required = {
+            "grenade_id",
+            "grenade_type",
+            "segment_index",
+            "start_tick",
+            "end_tick",
+            "start_x",
+            "start_y",
+            "start_z",
+            "end_x",
+            "end_y",
+            "end_z",
+        }
+        if not required.issubset(self.round_grenade_trajectory_segments.columns):
             return []
-        work = self.round_grenades.copy()
-        work = work[work["grenade_type"].astype(str).str.contains("Projectile", na=False)].copy()
-        work = work[work[["x", "y", "z"]].notna().all(axis=1)].copy()
+        work = self.round_grenade_trajectory_segments.copy()
+        work["start_tick"] = pd.to_numeric(work["start_tick"], errors="coerce")
+        work["end_tick"] = pd.to_numeric(work["end_tick"], errors="coerce")
+        work = work.dropna(subset=["start_tick", "end_tick"]).copy()
         if work.empty:
             return []
-        work["grenade_entity_id"] = pd.to_numeric(work["grenade_entity_id"], errors="coerce")
-        work = work[work["grenade_entity_id"].notna()].copy()
         trails: list[GrenadeTrail] = []
-        for _, group in work.groupby(["grenade_entity_id", "steamid", "name"], sort=False):
-            group = group.sort_values("tick").copy()
-            tick_diff = group["tick"].diff().fillna(1)
-            segment_id = (tick_diff > 2).cumsum()
-            longest_segment = group.groupby(segment_id, sort=False).size().idxmax()
-            segment = group[segment_id == longest_segment].copy()
-            current_row = segment.iloc[-1]
-            burn_icon_path: str | None = None
-            did_burn = False
+        for _, group in work.groupby("grenade_id", sort=False):
+            group = group.sort_values(["segment_index", "start_tick"]).copy()
+            current_row = group.iloc[-1]
             grenade_type = str(current_row["grenade_type"])
-            entity_id = int(current_row["grenade_entity_id"])
             smoke_start_tick: int | None = None
             flash_start_tick: int | None = None
             he_burst_start_tick: int | None = None
-            if grenade_type == "CMolotovProjectile":
-                player_name = str(current_row.get("name", ""))
-                steamid_value = current_row.get("steamid")
-                steamid = None if pd.isna(steamid_value) else str(steamid_value)
-                inferno_start = self._match_inferno_start(player_name, steamid, int(current_row["tick"]))
-                team_tick = int(inferno_start["tick"]) if inferno_start is not None else int(current_row["tick"])
-                team_num = self.player_team_lookup(player_name, steamid, team_tick)
+            burn_icon_path: str | None = None
+            did_burn = False
+            entity_id = pd.to_numeric(current_row.get("grenade_id"), errors="coerce")
+            resolved_entity_id = None if pd.isna(entity_id) else int(entity_id)
+            if grenade_type == "CSmokeGrenadeProjectile" and resolved_entity_id is not None:
+                smoke_start_tick = self._smoke_start_tick_for_entity(resolved_entity_id)
+            elif grenade_type == "CFlashbangProjectile" and resolved_entity_id is not None:
+                flash_start_tick = self._flash_start_tick_for_entity(resolved_entity_id)
+            elif grenade_type == "CHEGrenadeProjectile" and resolved_entity_id is not None:
+                he_effect = self._he_effect_for_entity(resolved_entity_id)
+                he_burst_start_tick = None if he_effect is None else int(he_effect.start_tick)
+            elif grenade_type == "CMolotovProjectile":
+                thrower = str(current_row.get("thrower", ""))
+                thrower_key = current_row.get("thrower_key")
+                steamid = None if pd.isna(thrower_key) or str(thrower_key).strip() == "" else str(thrower_key)
+                projectile_end_tick = int(pd.to_numeric(current_row.get("end_tick"), errors="coerce"))
+                inferno_start = self._match_inferno_start(thrower, steamid, projectile_end_tick)
+                team_tick = int(inferno_start["tick"]) if inferno_start is not None else projectile_end_tick
+                team_num = self.player_team_lookup(thrower, steamid, team_tick)
                 burn_icon_path = "icons/equipment/incgrenade.png" if team_num == 3 else "icons/equipment/firebomb.png"
                 did_burn = inferno_start is not None
-            elif grenade_type == "CSmokeGrenadeProjectile":
-                smoke_start_tick = self._smoke_start_tick_for_entity(entity_id)
-            elif grenade_type == "CFlashbangProjectile":
-                flash_start_tick = self._flash_start_tick_for_entity(entity_id)
-            elif grenade_type == "CHEGrenadeProjectile":
-                he_effect = self._he_effect_for_entity(entity_id)
-                he_burst_start_tick = None if he_effect is None else int(he_effect.start_tick)
             trails.append(
                 GrenadeTrail(
-                    points=tuple(
-                        GrenadeTrailPoint(
-                            tick=int(row["tick"]),
-                            x=float(row["x"]),
-                            y=float(row["y"]),
-                            z=float(row["z"]),
+                    segments=tuple(
+                        GrenadeTrailSegment(
+                            start_tick=int(row["start_tick"]),
+                            end_tick=int(row["end_tick"]),
+                            start_x=float(row["start_x"]),
+                            start_y=float(row["start_y"]),
+                            start_z=float(row["start_z"]),
+                            end_x=float(row["end_x"]),
+                            end_y=float(row["end_y"]),
+                            end_z=float(row["end_z"]),
                         )
-                        for _, row in segment.iterrows()
+                        for _, row in group.iterrows()
                     ),
                     grenade_type=grenade_type,
                     burn_icon_path=burn_icon_path,

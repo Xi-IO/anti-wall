@@ -33,7 +33,7 @@ TABLE_STEMS = (
     "bomb_exploded",
     "smokegrenade_expired",
     "inferno_startburn",
-    "grenades",
+    "grenade_trajectory_segments",
     "sound_events",
     "inferred_rounds",
 )
