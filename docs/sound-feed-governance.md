@@ -256,6 +256,12 @@ dedupe_key
 
 只有到了这一步，声音才真正进入 Information State 主链路。
 
+当前 V0 约束：
+
+- `sound_exposure.parquet` 独立于 `visibility.parquet`
+- 不修改 visibility schema
+- viewer feed 仍不直接消费 `sound_effect.parquet`
+
 ## 8. 对当前代码的直接约束
 
 后续实现应避免：

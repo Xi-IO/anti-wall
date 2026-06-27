@@ -665,17 +665,17 @@ class PygameRoundViewer:
 
     def _visibility_feed_title(self) -> str:
         if not self.selected_players:
-            return "Visibility Feed"
+            return "Info Feed"
         if len(self.selected_players) == 1:
-            return f"Visibility Feed · {self._player_display_name(next(iter(self.selected_players)))}"
-        return f"Visibility Feed · {len(self.selected_players)} players"
+            return f"Info Feed · {self._player_display_name(next(iter(self.selected_players)))}"
+        return f"Info Feed · {len(self.selected_players)} players"
 
     def _visibility_feed_empty_text(self) -> str:
         if not self.selected_players:
-            return "No visibility events"
+            return "No info events"
         if len(self.selected_players) == 1:
-            return f"No visibility events for {self._player_display_name(next(iter(self.selected_players)))}"
-        return "No visibility events for selected players"
+            return f"No info events for {self._player_display_name(next(iter(self.selected_players)))}"
+        return "No info events for selected players"
 
     def _current_frame_tick(self) -> int:
         if self.round_cache is None:
@@ -717,7 +717,7 @@ class PygameRoundViewer:
             round_id=self.selected_round_id,
             current_tick=frame_tick,
         )
-        if visible_lines == ["No visibility events"]:
+        if visible_lines == ["No info events"]:
             return [self._visibility_feed_empty_text()]
         return visible_lines
 

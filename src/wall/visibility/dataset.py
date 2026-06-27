@@ -56,11 +56,14 @@ class MatchDataset:
         tickrate: float,
         visibility_profile: VisibilityProfile | None = None,
         map_visibility_context: MapVisibilityContext | None = None,
+        include_visibility_context: bool = True,
     ) -> RoundData:
-        context = map_visibility_context or MapVisibilityContext.for_map(
-            self.map_name,
-            visibility_profile=visibility_profile,
-        )
+        context = None
+        if include_visibility_context:
+            context = map_visibility_context or MapVisibilityContext.for_map(
+                self.map_name,
+                visibility_profile=visibility_profile,
+            )
         return get_round_data(
             self.ticks,
             self.deaths,

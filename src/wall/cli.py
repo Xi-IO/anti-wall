@@ -206,6 +206,73 @@ def build_visibility_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_sound_exposure_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="wall sound-exposure",
+        description="Export observer-specific heard sound exposures for a parsed dataset.",
+    )
+    parser.add_argument("dataset", type=Path, help="Directory containing parsed output tables")
+    parser.add_argument(
+        "--round",
+        dest="round_ids",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Optional round ids to export. Omit to export all inferred rounds in the dataset.",
+    )
+    parser.add_argument(
+        "--split-rounds",
+        action="store_true",
+        help="Write one output file per round instead of the default combined multi-round table.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["parquet", "csv"],
+        default=None,
+        help="Output format. Defaults to parquet when available, otherwise csv.",
+    )
+    parser.add_argument(
+        "--tick-step",
+        type=int,
+        default=None,
+        help="Override continuous sound sampling step for all sound types. By default sampling is stratified by sound type.",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=4,
+        help="Number of worker processes for round-level sound exposure export. Default: 4",
+    )
+    parser.add_argument("--output", type=Path, default=None, help="Explicit output file path")
+    parser.add_argument("--tickrate", type=float, default=64.0, help="Tickrate used to build round data")
+    return parser
+
+
+def build_info_feed_audit_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="wall info-feed-audit",
+        description="Export a read-only audit table of generated viewer Info Feed events.",
+    )
+    parser.add_argument("dataset", type=Path, help="Directory containing parsed output tables")
+    parser.add_argument(
+        "--round",
+        dest="round_ids",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Optional round ids to audit. Omit to include all inferred rounds in the dataset.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["parquet", "csv"],
+        default=None,
+        help="Output format. Defaults to parquet when available, otherwise csv.",
+    )
+    parser.add_argument("--output", type=Path, default=None, help="Explicit output file path")
+    parser.add_argument("--tickrate", type=float, default=64.0, help="Tickrate used to derive round-relative seconds")
+    return parser
+
+
 def build_parse_argv(args: argparse.Namespace, demo_path: Path, output_dir: Path) -> list[str]:
     argv = [str(demo_path), "--output-dir", str(output_dir)]
     if args.table_format is not None:
@@ -517,6 +584,58 @@ def handle_visibility(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_sound_exposure(args: argparse.Namespace) -> int:
+    from wall.sound.exposure import run_sound_exposure_exports
+    from wall.visibility.dataset import MatchDataset
+
+    if not looks_like_dataset_dir(args.dataset):
+        raise FileNotFoundError(f"Dataset directory not found or invalid: {args.dataset}")
+    if args.jobs < 1:
+        raise ValueError("--jobs must be at least 1.")
+    loaded = MatchDataset.from_data_dir(args.dataset)
+    if args.round_ids is None:
+        round_ids = [int(round_id) for round_id in loaded.round_ids]
+    else:
+        round_ids = [int(round_id) for round_id in args.round_ids]
+    if len(round_ids) > 1 and args.output is not None and args.split_rounds:
+        raise ValueError("Use the default per-round output names when exporting multiple rounds.")
+    result = run_sound_exposure_exports(
+        args.dataset,
+        round_ids=round_ids,
+        output_path=args.output,
+        tick_step=args.tick_step,
+        tickrate=args.tickrate,
+        table_format=args.format,
+        dataset=loaded,
+        combine_rounds=not args.split_rounds,
+        jobs=args.jobs,
+    )
+    if result.output_path is not None:
+        print(f"Sound exposure table written to: {result.output_path}")
+    else:
+        for round_result in result.round_results:
+            print(f"Sound exposure table written to: {round_result.output_path}")
+    return 0
+
+
+def handle_info_feed_audit(args: argparse.Namespace) -> int:
+    from wall.dataset.index import DatasetIndex
+    from wall.viewer.info_events import export_info_feed_audit
+
+    if not looks_like_dataset_dir(args.dataset):
+        raise FileNotFoundError(f"Dataset directory not found or invalid: {args.dataset}")
+    loaded = DatasetIndex.from_data_dir(args.dataset)
+    output_path = export_info_feed_audit(
+        loaded,
+        round_ids=None if args.round_ids is None else [int(round_id) for round_id in args.round_ids],
+        tickrate=float(args.tickrate),
+        output_path=args.output,
+        table_format=args.format,
+    )
+    print(f"Info Feed audit written to: {output_path}")
+    return 0
+
+
 def _should_fast_exit(argv: list[str], *, argv_was_provided: bool) -> bool:
     return (not argv_was_provided) and bool(argv) and argv[0] == "visibility"
 
@@ -537,6 +656,14 @@ def main(argv: list[str] | None = None) -> int:
             parser = build_visibility_parser()
             args = parser.parse_args(argv[1:])
             exit_code = int(handle_visibility(args))
+        elif argv and argv[0] == "sound-exposure":
+            parser = build_sound_exposure_parser()
+            args = parser.parse_args(argv[1:])
+            exit_code = int(handle_sound_exposure(args))
+        elif argv and argv[0] == "info-feed-audit":
+            parser = build_info_feed_audit_parser()
+            args = parser.parse_args(argv[1:])
+            exit_code = int(handle_info_feed_audit(args))
         else:
             parser = build_playback_parser()
             args = parser.parse_args(argv)

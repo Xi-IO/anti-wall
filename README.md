@@ -11,8 +11,8 @@
 * 打开本地 pygame demo viewer
 * 显示玩家、武器、死亡、开火、投掷物、烟雾和时间轴
 * 基于 FOV + 地图几何 LOS 生成可见性表
-* 显示 visibility feed：谁在什么时候看见了谁
-* 支持按选中玩家过滤 visibility feed
+* 显示 Info Feed：谁在什么时候看见了谁，以及谁理论上听到了哪些高价值声音
+* 支持按选中玩家过滤 Info Feed
 * 本地优先，不依赖云端上传
 
 ## 安装
@@ -73,6 +73,31 @@ wall visibility outputs\match730_003825715054175584453_1941916173_129
 
 viewer 会消费已经预计算好的 `visibility.parquet`。  
 普通 viewer 启动时不会现场构建 Awpy geometry。
+
+## 声音信息流
+
+生成 observer-specific 的声音听觉结果：
+
+```powershell
+wall sound-exposure outputs\match730_003825715054175584453_1941916173_129
+```
+
+viewer 会在存在 `sound_exposure.parquet` 时，把其中高信息价值的声音事件并入右侧 `Info Feed`。  
+如果 `sound_exposure.parquet` 缺失或损坏，viewer 仍可正常启动，只是不会显示 sound-derived feed。
+
+## Feed 审计
+
+导出当前 viewer 实际生成的 Info Feed 审计表：
+
+```powershell
+wall info-feed-audit outputs\match730_003825715054175584453_1941916173_129
+```
+
+这个命令不会修改 dataset，只会输出一张只读审计表，方便检查：
+
+* movement / hard_step 是否偏吵
+* gunfire 文案是否可读
+* bomb / utility 是否足够显著
 
 ## 地图资产
 

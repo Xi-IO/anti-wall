@@ -289,7 +289,7 @@ class ViewerShellTests(unittest.TestCase):
 
         lines = viewer._sidebar_event_lines(100)
 
-        self.assertEqual(lines, ["No visibility events"])
+        self.assertEqual(lines, ["No info events"])
 
     def test_sidebar_event_lines_show_all_when_no_players_selected(self) -> None:
         viewer = self._build_viewer()
@@ -464,7 +464,7 @@ class ViewerShellTests(unittest.TestCase):
 
     def test_visibility_feed_title_reflects_selection(self) -> None:
         viewer = self._build_viewer()
-        self.assertEqual(viewer._visibility_feed_title(), "Visibility Feed")
+        self.assertEqual(viewer._visibility_feed_title(), "Info Feed")
 
         runtime = FakeRuntime(
             loaded_data=FakeLoadedData(),
@@ -478,14 +478,14 @@ class ViewerShellTests(unittest.TestCase):
         viewer.runtime = runtime
 
         viewer.selected_players = {"player"}
-        self.assertEqual(viewer._visibility_feed_title(), "Visibility Feed · player")
+        self.assertEqual(viewer._visibility_feed_title(), "Info Feed · player")
 
         viewer.selected_players = {"AIKUUUUUU", "Eggo"}
-        self.assertEqual(viewer._visibility_feed_title(), "Visibility Feed · 2 players")
+        self.assertEqual(viewer._visibility_feed_title(), "Info Feed · 2 players")
 
     def test_visibility_feed_empty_text_reflects_selection(self) -> None:
         viewer = self._build_viewer()
-        self.assertEqual(viewer._visibility_feed_empty_text(), "No visibility events")
+        self.assertEqual(viewer._visibility_feed_empty_text(), "No info events")
 
         runtime = FakeRuntime(
             loaded_data=FakeLoadedData(),
@@ -499,10 +499,10 @@ class ViewerShellTests(unittest.TestCase):
         viewer.runtime = runtime
 
         viewer.selected_players = {"player"}
-        self.assertEqual(viewer._visibility_feed_empty_text(), "No visibility events for player")
+        self.assertEqual(viewer._visibility_feed_empty_text(), "No info events for player")
 
         viewer.selected_players = {"AIKUUUUUU", "Eggo"}
-        self.assertEqual(viewer._visibility_feed_empty_text(), "No visibility events for selected players")
+        self.assertEqual(viewer._visibility_feed_empty_text(), "No info events for selected players")
 
     def test_sidebar_event_lines_use_contextual_empty_state_for_selected_player(self) -> None:
         viewer = self._build_viewer()
@@ -524,7 +524,7 @@ class ViewerShellTests(unittest.TestCase):
 
         lines = viewer._sidebar_event_lines(120)
 
-        self.assertEqual(lines, ["No visibility events for player"])
+        self.assertEqual(lines, ["No info events for player"])
 
     def test_sidebar_player_entries_sort_by_display_number_not_steamid(self) -> None:
         viewer = self._build_viewer()

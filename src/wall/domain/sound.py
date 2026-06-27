@@ -52,6 +52,7 @@ class SoundEffect:
     y: float
     z: float
     raw_source: str
+    shot_count: int | None
     style: SoundStyle
 
 
@@ -132,6 +133,27 @@ def _parse_source_id(source_id: str) -> tuple[str | None, str | None]:
     if source_id.startswith("name:"):
         return None, source_id.split(":", 1)[1]
     return source_id, None
+
+
+def resolve_sound_effect_position(
+    effect: SoundEffect,
+    *,
+    tick: int,
+    round_players: RoundPlayers | None,
+) -> tuple[float, float, float] | None:
+    if effect.position_mode == "event_snapshot":
+        if np.isnan(effect.x) or np.isnan(effect.y):
+            return None
+        return (effect.x, effect.y, effect.z)
+    if effect.position_mode == "entity_at_tick":
+        if effect.source_type != "player" or round_players is None:
+            return None
+        steamid, name = _parse_source_id(effect.source_id)
+        frame = round_players.frame_at(steamid=steamid, name=name, tick=tick)
+        if frame is None:
+            return None
+        return (frame.x, frame.y, frame.z)
+    return None
 
 
 class SoundTimeline:
@@ -215,19 +237,7 @@ class SoundTimeline:
         tick: int,
         round_players: RoundPlayers | None,
     ) -> tuple[float, float, float] | None:
-        if effect.position_mode == "event_snapshot":
-            if np.isnan(effect.x) or np.isnan(effect.y):
-                return None
-            return (effect.x, effect.y, effect.z)
-        if effect.position_mode == "entity_at_tick":
-            if effect.source_type != "player" or round_players is None:
-                return None
-            steamid, name = _parse_source_id(effect.source_id)
-            frame = round_players.frame_at(steamid=steamid, name=name, tick=tick)
-            if frame is None:
-                return None
-            return (frame.x, frame.y, frame.z)
-        return None
+        return resolve_sound_effect_position(effect, tick=tick, round_players=round_players)
 
     def _build_effects(self, round_sound_effects: pd.DataFrame) -> list[SoundEffect]:
         if round_sound_effects.empty:
@@ -255,6 +265,9 @@ class SoundTimeline:
                 y=_coerce_float(getattr(row, "y", np.nan)),
                 z=_coerce_float(getattr(row, "z", np.nan)),
                 raw_source=_coerce_text(getattr(row, "raw_source", "")),
+                shot_count=None
+                if pd.isna(pd.to_numeric(getattr(row, "shot_count", np.nan), errors="coerce"))
+                else int(pd.to_numeric(getattr(row, "shot_count", np.nan), errors="coerce")),
                 style=DEFAULT_SOUND_STYLE,
             )
             effects.append(effect.__class__(**{**effect.__dict__, "style": _style_for_effect(effect)}))

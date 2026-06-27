@@ -7,10 +7,14 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from wall.cli import build_info_feed_audit_parser, handle_info_feed_audit
 from wall.viewer.info_events import (
+    INFO_FEED_AUDIT_COLUMNS,
     InfoEvent,
+    SOUND_EVENT_KIND,
     VISIBILITY_EVENT_KIND,
     UNSUPPORTED_VISIBILITY_SCHEMA_MESSAGE,
+    build_info_feed_audit_table,
     build_visibility_spotted_events,
     filter_events_by_players,
     format_info_event_line,
@@ -40,6 +44,21 @@ class ViewerInfoEventsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="F:/wall") as tmp_dir:
             data_dir = Path(tmp_dir)
             pd.DataFrame(rows).to_parquet(data_dir / "visibility.parquet", index=False)
+            loaded_data = FakeLoadedData(data_dir=data_dir, inferred_rounds=self._inferred_rounds())
+            return load_info_events_for_dataset(loaded_data, round_id=round_id, tickrate=10.0)
+
+    def _events_from_sound_rows(
+        self,
+        rows: list[dict[str, object]],
+        *,
+        tick_rows: list[dict[str, object]] | None = None,
+        round_id: int | None = None,
+    ) -> list[InfoEvent]:
+        with tempfile.TemporaryDirectory(dir="F:/wall") as tmp_dir:
+            data_dir = Path(tmp_dir)
+            pd.DataFrame(rows).to_parquet(data_dir / "sound_exposure.parquet", index=False)
+            if tick_rows is not None:
+                pd.DataFrame(tick_rows).to_parquet(data_dir / "ticks.parquet", index=False)
             loaded_data = FakeLoadedData(data_dir=data_dir, inferred_rounds=self._inferred_rounds())
             return load_info_events_for_dataset(loaded_data, round_id=round_id, tickrate=10.0)
 
@@ -110,10 +129,14 @@ class ViewerInfoEventsTests(unittest.TestCase):
 
         with (
             patch("wall.viewer.info_events._visibility_artifact_path", return_value=Path("F:/wall/outputs/example/visibility.parquet")),
-            patch("pathlib.Path.exists", return_value=True),
+            patch("wall.viewer.info_events._sound_exposure_artifact_path", return_value=Path("F:/wall/outputs/example/sound_exposure.parquet")),
             patch(
                 "wall.viewer.info_events._visibility_artifact_columns",
                 return_value=["round_id", "observer", "target", "start_tick", "end_tick", "state", "unused_col"],
+            ),
+            patch(
+                "pathlib.Path.exists",
+                new=lambda self: str(self).endswith("visibility.parquet"),
             ),
             patch("wall.viewer.info_events.pd.read_parquet", return_value=projected_frame) as read_parquet,
         ):
@@ -266,13 +289,655 @@ class ViewerInfoEventsTests(unittest.TestCase):
 
         self.assertEqual(events, [])
 
+    def test_sound_exposure_gunfire_builds_sound_info_event(self) -> None:
+        events = self._events_from_sound_rows(
+            [
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000001",
+                    "observer_id": "s_obs",
+                    "source_type": "player",
+                    "source_id": "s_src",
+                    "start_tick": 112,
+                    "end_tick": 112,
+                    "sound_class": "weapon",
+                    "sound_action": "gunfire",
+                    "item_name": "ak47",
+                    "shot_count": 3,
+                    "raw_source": "weapon_fire",
+                }
+            ],
+            tick_rows=[
+                {"steamid": "s_obs", "name": "Observer"},
+                {"steamid": "s_src", "name": "Shooter"},
+            ],
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].kind, SOUND_EVENT_KIND)
+        self.assertEqual(events[0].observer_key, "s_obs")
+        self.assertEqual(events[0].target_key, "s_src")
+        self.assertEqual(events[0].message, "1.20s  Observer heard 3 ak47 shots from Shooter")
+
+    def test_sound_exposure_gunfire_singular_message_does_not_sound_sustained(self) -> None:
+        events = self._events_from_sound_rows(
+            [
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000002",
+                    "observer_id": "s_obs",
+                    "source_type": "player",
+                    "source_id": "s_src",
+                    "start_tick": 120,
+                    "end_tick": 124,
+                    "sound_class": "weapon",
+                    "sound_action": "gunfire",
+                    "item_name": "AWP",
+                    "shot_count": 1,
+                    "raw_source": "weapon_fire",
+                }
+            ],
+            tick_rows=[
+                {"steamid": "s_obs", "name": "Observer"},
+                {"steamid": "s_src", "name": "Shooter"},
+            ],
+        )
+
+        self.assertEqual(events[0].message, "2.00s  Observer heard AWP shot from Shooter")
+        self.assertNotIn("持续", events[0].message)
+
+    def test_locomotion_rows_are_merged_into_single_feed_event(self) -> None:
+        events = self._events_from_sound_rows(
+            [
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000011",
+                    "observer_id": "s_obs",
+                    "source_type": "player",
+                    "source_id": "s_src",
+                    "start_tick": 100,
+                    "end_tick": 118,
+                    "sound_class": "movement",
+                    "sound_action": "locomotion",
+                    "item_name": "",
+                    "shot_count": None,
+                    "raw_source": "inferred_movement",
+                    "distance_min": 400.0,
+                },
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000012",
+                    "observer_id": "s_obs",
+                    "source_type": "player",
+                    "source_id": "s_src",
+                    "start_tick": 126,
+                    "end_tick": 144,
+                    "sound_class": "movement",
+                    "sound_action": "locomotion",
+                    "item_name": "",
+                    "shot_count": None,
+                    "raw_source": "inferred_movement",
+                    "distance_min": 380.0,
+                },
+            ],
+            tick_rows=[
+                {"steamid": "s_obs", "name": "Observer"},
+                {"steamid": "s_src", "name": "Runner"},
+            ],
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].tick, 100)
+        self.assertEqual(events[0].message, "0.00s  Observer heard movement from Runner")
+
+    def test_short_locomotion_feed_event_is_filtered(self) -> None:
+        events = self._events_from_sound_rows(
+            [
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000013",
+                    "observer_id": "s_obs",
+                    "source_type": "player",
+                    "source_id": "s_src",
+                    "start_tick": 100,
+                    "end_tick": 110,
+                    "sound_class": "movement",
+                    "sound_action": "locomotion",
+                    "item_name": "",
+                    "shot_count": None,
+                    "raw_source": "inferred_movement",
+                    "distance_min": 500.0,
+                }
+            ],
+            tick_rows=[
+                {"steamid": "s_obs", "name": "Observer"},
+                {"steamid": "s_src", "name": "Runner"},
+            ],
+        )
+
+        self.assertEqual(events, [])
+
+    def test_hard_step_events_are_deduped_within_window(self) -> None:
+        events = self._events_from_sound_rows(
+            [
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000014",
+                    "observer_id": "s_obs",
+                    "source_type": "player",
+                    "source_id": "s_src",
+                    "start_tick": 100,
+                    "end_tick": 100,
+                    "sound_class": "movement",
+                    "sound_action": "hard_step",
+                    "item_name": "",
+                    "shot_count": None,
+                    "raw_source": "player_footstep",
+                    "distance_min": 200.0,
+                },
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000015",
+                    "observer_id": "s_obs",
+                    "source_type": "player",
+                    "source_id": "s_src",
+                    "start_tick": 120,
+                    "end_tick": 120,
+                    "sound_class": "movement",
+                    "sound_action": "hard_step",
+                    "item_name": "",
+                    "shot_count": None,
+                    "raw_source": "player_footstep",
+                    "distance_min": 180.0,
+                },
+            ],
+            tick_rows=[
+                {"steamid": "s_obs", "name": "Observer"},
+                {"steamid": "s_src", "name": "Runner"},
+            ],
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].tick, 100)
+        self.assertEqual(events[0].message, "0.00s  Observer heard hard step from Runner")
+
+    def test_hard_step_events_outside_64_tick_window_both_remain(self) -> None:
+        events = self._events_from_sound_rows(
+            [
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000015a",
+                    "observer_id": "s_obs",
+                    "source_type": "player",
+                    "source_id": "s_src",
+                    "start_tick": 100,
+                    "end_tick": 100,
+                    "sound_class": "movement",
+                    "sound_action": "hard_step",
+                    "item_name": "",
+                    "shot_count": None,
+                    "raw_source": "player_footstep",
+                    "distance_min": 200.0,
+                },
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000015b",
+                    "observer_id": "s_obs",
+                    "source_type": "player",
+                    "source_id": "s_src",
+                    "start_tick": 165,
+                    "end_tick": 165,
+                    "sound_class": "movement",
+                    "sound_action": "hard_step",
+                    "item_name": "",
+                    "shot_count": None,
+                    "raw_source": "player_footstep",
+                    "distance_min": 180.0,
+                },
+            ],
+            tick_rows=[
+                {"steamid": "s_obs", "name": "Observer"},
+                {"steamid": "s_src", "name": "Runner"},
+            ],
+        )
+
+        self.assertEqual([event.tick for event in events], [100, 165])
+
+    def test_utility_actions_enter_feed_except_bounce(self) -> None:
+        events = self._events_from_sound_rows(
+            [
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000015c",
+                    "observer_id": "s_obs",
+                    "source_type": "grenade",
+                    "source_id": "g1",
+                    "start_tick": 100,
+                    "end_tick": 100,
+                    "sound_class": "utility",
+                    "sound_action": "he_detonate",
+                    "item_name": "hegrenade",
+                    "shot_count": None,
+                    "raw_source": "hegrenade_detonate",
+                },
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000015d",
+                    "observer_id": "s_obs",
+                    "source_type": "grenade",
+                    "source_id": "g2",
+                    "start_tick": 120,
+                    "end_tick": 120,
+                    "sound_class": "utility",
+                    "sound_action": "smoke_detonate",
+                    "item_name": "smokegrenade",
+                    "shot_count": None,
+                    "raw_source": "smokegrenade_detonate",
+                },
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000015e",
+                    "observer_id": "s_obs",
+                    "source_type": "grenade",
+                    "source_id": "g3",
+                    "start_tick": 140,
+                    "end_tick": 140,
+                    "sound_class": "utility",
+                    "sound_action": "flash_detonate",
+                    "item_name": "flashbang",
+                    "shot_count": None,
+                    "raw_source": "flashbang_detonate",
+                },
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000015f",
+                    "observer_id": "s_obs",
+                    "source_type": "grenade",
+                    "source_id": "g4",
+                    "start_tick": 160,
+                    "end_tick": 160,
+                    "sound_class": "utility",
+                    "sound_action": "inferno_startburn",
+                    "item_name": "molotov",
+                    "shot_count": None,
+                    "raw_source": "inferno_startburn",
+                },
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000015g",
+                    "observer_id": "s_obs",
+                    "source_type": "grenade",
+                    "source_id": "g5",
+                    "start_tick": 180,
+                    "end_tick": 180,
+                    "sound_class": "utility",
+                    "sound_action": "bounce",
+                    "item_name": "flashbang",
+                    "shot_count": None,
+                    "raw_source": "grenade_bounce",
+                },
+            ],
+        )
+
+        self.assertEqual(
+            [event.message for event in events],
+            [
+                "0.00s  s_obs heard HE detonate",
+                "2.00s  s_obs heard smoke bloom",
+                "4.00s  s_obs heard flash detonate",
+                "6.00s  s_obs heard fire start",
+            ],
+        )
+
+    def test_damage_reload_and_zoom_still_do_not_enter_feed(self) -> None:
+        events = self._events_from_sound_rows(
+            [
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000015h",
+                    "observer_id": "s_obs",
+                    "source_type": "player",
+                    "source_id": "s_src",
+                    "start_tick": 100,
+                    "end_tick": 100,
+                    "sound_class": "damage",
+                    "sound_action": "hurt",
+                    "item_name": "",
+                    "shot_count": None,
+                    "raw_source": "player_hurt",
+                },
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000015i",
+                    "observer_id": "s_obs",
+                    "source_type": "player",
+                    "source_id": "s_src",
+                    "start_tick": 120,
+                    "end_tick": 120,
+                    "sound_class": "weapon",
+                    "sound_action": "reload",
+                    "item_name": "ak47",
+                    "shot_count": None,
+                    "raw_source": "weapon_reload",
+                },
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000015j",
+                    "observer_id": "s_obs",
+                    "source_type": "player",
+                    "source_id": "s_src",
+                    "start_tick": 140,
+                    "end_tick": 140,
+                    "sound_class": "weapon",
+                    "sound_action": "zoom",
+                    "item_name": "awp",
+                    "shot_count": None,
+                    "raw_source": "weapon_zoom",
+                },
+            ],
+        )
+
+        self.assertEqual(events, [])
+
+    def test_invalid_sound_exposure_schema_is_ignored_without_breaking_visibility_events(self) -> None:
+        with tempfile.TemporaryDirectory(dir="F:/wall") as tmp_dir:
+            data_dir = Path(tmp_dir)
+            pd.DataFrame(
+                [
+                    {"round_id": 1, "observer": "A", "target": "X", "start_tick": 100, "end_tick": 110, "start_seconds": 0.0, "end_seconds": 1.0, "state": "VISIBLE"},
+                ]
+            ).to_parquet(data_dir / "visibility.parquet", index=False)
+            pd.DataFrame(
+                [
+                    {"round_id": 1, "observer_id": "s_obs", "start_tick": 112},
+                ]
+            ).to_parquet(data_dir / "sound_exposure.parquet", index=False)
+            loaded_data = FakeLoadedData(data_dir=data_dir, inferred_rounds=self._inferred_rounds())
+
+            events = load_info_events_for_dataset(loaded_data, tickrate=10.0)
+
+        self.assertEqual([(event.kind, event.observer, event.target) for event in events], [(VISIBILITY_EVENT_KIND, "A", "X")])
+
+    def test_invalid_sound_exposure_schema_logs_ignored_profile_stage(self) -> None:
+        with tempfile.TemporaryDirectory(dir="F:/wall") as tmp_dir:
+            data_dir = Path(tmp_dir)
+            pd.DataFrame(
+                [
+                    {"round_id": 1, "observer": "A", "target": "X", "start_tick": 100, "end_tick": 110, "start_seconds": 0.0, "end_seconds": 1.0, "state": "VISIBLE"},
+                ]
+            ).to_parquet(data_dir / "visibility.parquet", index=False)
+            pd.DataFrame(
+                [
+                    {"round_id": 1, "observer_id": "s_obs", "start_tick": 112},
+                ]
+            ).to_parquet(data_dir / "sound_exposure.parquet", index=False)
+            loaded_data = FakeLoadedData(data_dir=data_dir, inferred_rounds=self._inferred_rounds())
+
+            with patch("wall.viewer.info_events.profile_log") as profile_log:
+                load_info_events_for_dataset(loaded_data, tickrate=10.0)
+
+        ignored_calls = [call for call in profile_log.call_args_list if call.args and call.args[0] == "info_events.sound_exposure_ignored"]
+        self.assertEqual(len(ignored_calls), 1)
+        self.assertIn("reason=ValueError", ignored_calls[0].kwargs["note"])
+
+    def test_sound_feed_profile_records_merge_and_dedupe_stats(self) -> None:
+        with tempfile.TemporaryDirectory(dir="F:/wall") as tmp_dir:
+            data_dir = Path(tmp_dir)
+            pd.DataFrame(
+                [
+                    {
+                        "round_id": 1,
+                        "effect_id": "snd_r01_000016",
+                        "observer_id": "s_obs",
+                        "source_type": "player",
+                        "source_id": "s_src",
+                        "start_tick": 100,
+                        "end_tick": 118,
+                        "sound_class": "movement",
+                        "sound_action": "locomotion",
+                        "item_name": "",
+                        "shot_count": None,
+                        "raw_source": "inferred_movement",
+                        "distance_min": 400.0,
+                    },
+                    {
+                        "round_id": 1,
+                        "effect_id": "snd_r01_000017",
+                        "observer_id": "s_obs",
+                        "source_type": "player",
+                        "source_id": "s_src",
+                        "start_tick": 126,
+                        "end_tick": 144,
+                        "sound_class": "movement",
+                        "sound_action": "locomotion",
+                        "item_name": "",
+                        "shot_count": None,
+                        "raw_source": "inferred_movement",
+                        "distance_min": 380.0,
+                    },
+                    {
+                        "round_id": 1,
+                        "effect_id": "snd_r01_000018",
+                        "observer_id": "s_obs",
+                        "source_type": "player",
+                        "source_id": "s_src",
+                        "start_tick": 150,
+                        "end_tick": 150,
+                        "sound_class": "movement",
+                        "sound_action": "hard_step",
+                        "item_name": "",
+                        "shot_count": None,
+                        "raw_source": "player_footstep",
+                        "distance_min": 210.0,
+                    },
+                    {
+                        "round_id": 1,
+                        "effect_id": "snd_r01_000019",
+                        "observer_id": "s_obs",
+                        "source_type": "player",
+                        "source_id": "s_src",
+                        "start_tick": 170,
+                        "end_tick": 170,
+                        "sound_class": "movement",
+                        "sound_action": "hard_step",
+                        "item_name": "",
+                        "shot_count": None,
+                        "raw_source": "player_footstep",
+                        "distance_min": 205.0,
+                    },
+                ]
+            ).to_parquet(data_dir / "sound_exposure.parquet", index=False)
+            pd.DataFrame(
+                [
+                    {"steamid": "s_obs", "name": "Observer"},
+                    {"steamid": "s_src", "name": "Runner"},
+                ]
+            ).to_parquet(data_dir / "ticks.parquet", index=False)
+            loaded_data = FakeLoadedData(data_dir=data_dir, inferred_rounds=self._inferred_rounds())
+
+            with patch("wall.viewer.info_events.profile_log") as profile_log:
+                load_info_events_for_dataset(loaded_data, tickrate=10.0)
+
+        build_calls = [call for call in profile_log.call_args_list if call.args and call.args[0] == "info_events.sound_feed_build"]
+        self.assertEqual(len(build_calls), 1)
+        note = build_calls[0].kwargs["note"]
+        self.assertIn("sound_movement_exposures_merged=1", note)
+        self.assertIn("sound_hard_step_events_deduped=1", note)
+        self.assertIn("sound_exposure_rows_by_class_action=", note)
+        self.assertIn("sound_info_events_generated_by_class_action=", note)
+        self.assertIn("sound_info_events_dropped_by_class_action=", note)
+
+    def test_load_info_events_combines_visibility_and_sound_events(self) -> None:
+        with tempfile.TemporaryDirectory(dir="F:/wall") as tmp_dir:
+            data_dir = Path(tmp_dir)
+            pd.DataFrame(
+                [
+                    {"round_id": 1, "observer": "A", "target": "X", "start_tick": 100, "end_tick": 110, "start_seconds": 0.0, "end_seconds": 1.0, "state": "VISIBLE"},
+                ]
+            ).to_parquet(data_dir / "visibility.parquet", index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "round_id": 1,
+                        "effect_id": "snd_r01_000010",
+                        "observer_id": "s_obs",
+                        "source_type": "player",
+                        "source_id": "s_src",
+                        "start_tick": 112,
+                        "end_tick": 112,
+                        "sound_class": "weapon",
+                        "sound_action": "gunfire",
+                        "item_name": "glock",
+                        "shot_count": 1,
+                        "raw_source": "weapon_fire",
+                    }
+                ]
+            ).to_parquet(data_dir / "sound_exposure.parquet", index=False)
+            pd.DataFrame(
+                [
+                    {"steamid": "s_obs", "name": "Observer"},
+                    {"steamid": "s_src", "name": "Shooter"},
+                ]
+            ).to_parquet(data_dir / "ticks.parquet", index=False)
+            loaded_data = FakeLoadedData(data_dir=data_dir, inferred_rounds=self._inferred_rounds())
+
+            events = load_info_events_for_dataset(loaded_data, tickrate=10.0)
+
+        self.assertEqual([event.kind for event in events], [VISIBILITY_EVENT_KIND, SOUND_EVENT_KIND])
+
+    def test_sound_feed_priority_orders_bomb_before_movement(self) -> None:
+        events = self._events_from_sound_rows(
+            [
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000020",
+                    "observer_id": "s_obs",
+                    "source_type": "player",
+                    "source_id": "s_src",
+                    "start_tick": 100,
+                    "end_tick": 132,
+                    "sound_class": "movement",
+                    "sound_action": "locomotion",
+                    "item_name": "",
+                    "shot_count": None,
+                    "raw_source": "inferred_movement",
+                    "distance_min": 200.0,
+                },
+                {
+                    "round_id": 1,
+                    "effect_id": "snd_r01_000021",
+                    "observer_id": "s_obs",
+                    "source_type": "player",
+                    "source_id": "s_src",
+                    "start_tick": 100,
+                    "end_tick": 100,
+                    "sound_class": "bomb",
+                    "sound_action": "dropped",
+                    "item_name": "c4",
+                    "shot_count": None,
+                    "raw_source": "bomb_dropped",
+                    "distance_min": 50.0,
+                },
+            ],
+            tick_rows=[
+                {"steamid": "s_obs", "name": "Observer"},
+                {"steamid": "s_src", "name": "Player"},
+            ],
+        )
+
+        self.assertEqual([event.message for event in events], [
+            "0.00s  Observer heard bomb dropped",
+            "0.00s  Observer heard movement from Player",
+        ])
+
+    def test_build_info_feed_audit_table_includes_sorted_visibility_and_sound_rows(self) -> None:
+        with tempfile.TemporaryDirectory(dir="F:/wall") as tmp_dir:
+            data_dir = Path(tmp_dir)
+            pd.DataFrame(
+                [
+                    {"round_id": 1, "observer": "A", "target": "X", "observer_key": "sA", "target_key": "sX", "start_tick": 100, "end_tick": 110, "start_seconds": 0.0, "end_seconds": 1.0, "state": "VISIBLE"},
+                ]
+            ).to_parquet(data_dir / "visibility.parquet", index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "round_id": 1,
+                        "effect_id": "snd_r01_000030",
+                        "observer_id": "s_obs",
+                        "source_type": "player",
+                        "source_id": "s_src",
+                        "start_tick": 100,
+                        "end_tick": 132,
+                        "sound_class": "movement",
+                        "sound_action": "locomotion",
+                        "item_name": "",
+                        "shot_count": None,
+                        "raw_source": "inferred_movement",
+                        "distance_min": 220.0,
+                    },
+                    {
+                        "round_id": 1,
+                        "effect_id": "snd_r01_000031",
+                        "observer_id": "s_obs",
+                        "source_type": "player",
+                        "source_id": "s_src",
+                        "start_tick": 100,
+                        "end_tick": 100,
+                        "sound_class": "bomb",
+                        "sound_action": "dropped",
+                        "item_name": "c4",
+                        "shot_count": None,
+                        "raw_source": "bomb_dropped",
+                        "distance_min": 30.0,
+                    },
+                ]
+            ).to_parquet(data_dir / "sound_exposure.parquet", index=False)
+            pd.DataFrame(
+                [
+                    {"steamid": "s_obs", "name": "Observer"},
+                    {"steamid": "s_src", "name": "Player"},
+                ]
+            ).to_parquet(data_dir / "ticks.parquet", index=False)
+            loaded_data = FakeLoadedData(data_dir=data_dir, inferred_rounds=self._inferred_rounds())
+
+            table = build_info_feed_audit_table(loaded_data, tickrate=10.0)
+
+        self.assertEqual(table.columns.tolist(), INFO_FEED_AUDIT_COLUMNS)
+        self.assertEqual(table["event_class"].tolist(), ["visibility", "sound", "sound"])
+        self.assertEqual(table["priority"].tolist(), [-1, 0, 4])
+        self.assertEqual(table["sound_class"].tolist(), ["", "bomb", "movement"])
+        self.assertEqual(table["observer_name"].tolist(), ["A", "Observer", "Observer"])
+
+    def test_handle_info_feed_audit_writes_output_table(self) -> None:
+        with tempfile.TemporaryDirectory(dir="F:/wall") as tmp_dir:
+            data_dir = Path(tmp_dir)
+            pd.DataFrame(
+                [
+                    {"round_id": 1, "observer": "A", "target": "X", "observer_key": "sA", "target_key": "sX", "start_tick": 100, "end_tick": 110, "start_seconds": 0.0, "end_seconds": 1.0, "state": "VISIBLE"},
+                ]
+            ).to_parquet(data_dir / "visibility.parquet", index=False)
+            pd.DataFrame(
+                [
+                    {"inferred_round_id": 1, "start_tick": 100},
+                ]
+            ).to_parquet(data_dir / "inferred_rounds.parquet", index=False)
+            (data_dir / "metadata.json").write_text("{}", encoding="utf-8")
+            args = build_info_feed_audit_parser().parse_args([str(data_dir), "--format", "csv"])
+
+            exit_code = handle_info_feed_audit(args)
+
+            self.assertEqual(exit_code, 0)
+            exported = pd.read_csv(data_dir / "info_feed_audit.csv")
+            self.assertEqual(exported.columns.tolist(), INFO_FEED_AUDIT_COLUMNS)
+            self.assertEqual(exported.iloc[0]["event_class"], "visibility")
+
     def test_unsupported_message_constant_mentions_regeneration(self) -> None:
         self.assertIn("wall visibility <dataset_dir>", UNSUPPORTED_VISIBILITY_SCHEMA_MESSAGE)
 
     def test_no_visible_events_renders_placeholder_line(self) -> None:
         lines = visible_event_lines_for_tick([], round_id=1, current_tick=100)
 
-        self.assertEqual(lines, ["No visibility events"])
+        self.assertEqual(lines, ["No info events"])
 
     def test_format_info_event_line_matches_sidebar_text(self) -> None:
         event = InfoEvent(1, 100, 80.3, VISIBILITY_EVENT_KIND, "playerA", "playerB", "")

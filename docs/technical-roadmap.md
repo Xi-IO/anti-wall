@@ -49,10 +49,12 @@ Demo
 ```text
 Players list
 → selection
-→ Visibility Feed
+→ Info Feed
 ```
 
-也就是说，近期 viewer 的信息侧栏主线是围绕 precomputed visibility feed 做交互，而不是继续在 sidebar 里堆叠原始状态字段。
+也就是说，近期 viewer 的信息侧栏主线是围绕 precomputed Info Feed 做交互，而不是继续在 sidebar 里堆叠原始状态字段。
+
+当前这个 `Info Feed` 已不再只包含 visibility spotted events，也可以在存在 optional `sound_exposure.parquet` 时承载 sound-derived events。
 
 ---
 
@@ -75,6 +77,7 @@ wall catalog <dataset_dir>
 demo
 → parse / dataset build
 → visibility.parquet
+→ optional sound_exposure.parquet
 → Viewer
 ```
 
@@ -201,12 +204,14 @@ Event Layer
 
 当前已落地的 viewer 消费方式：
 
-* `info_events.py` 只读取 precomputed `visibility.parquet`
-* viewer startup 会一次性 preload all-round visibility feed
+* `info_events.py` 读取 precomputed `visibility.parquet`
+* 若存在 `sound_exposure.parquet`，则额外读取 optional sound artifact 并构建 sound-derived Info Feed
+* viewer startup 会一次性 preload all-round Info Feed
 * round 切换和 Players selection 只过滤已有 `InfoEvent`
 * 不重新读取 parquet
-* 不重新 build spotted events
+* 不重新 build visibility spotted events 或 sound-derived feed events
 * artifact 缺少 `observer_steamid / target_steamid` 时，当前 viewer 通过 display-name alias 做兼容过滤
+* `sound_exposure.parquet` 缺失时 viewer 正常打开；损坏或 schema 不兼容时 fail-soft 忽略 sound feed
 
 ## Map-Scoped Visibility Runtime
 
@@ -235,9 +240,12 @@ MatchDataset
 
 * `visibility.parquet` 已作为默认 pair-level artifact 落盘
 * viewer 已与默认 geometry cache 初始化解耦
-* viewer sidebar 已基于 `InfoEvent` 展示 visibility spotted feed
+* `sound_exposure.parquet` 已作为 observer-specific heard-event artifact 落盘
+* viewer sidebar 已基于 `InfoEvent` 展示 `Info Feed`
+* 当前 `Info Feed` 同时承载 visibility spotted events 和受控 sound-derived events
 * Players list selection 内部 key 已优先使用 Steam64
 * 当前仍需长期补齐 artifact 导出的 `observer_steamid / target_steamid`
+* sound-derived feed 当前仍有长期债务，例如名字映射边界仍偏靠近 raw `ticks.parquet`
 * 后续 batch 仍然需要单独命令和 map-grouped worker 设计
 
 ## Visibility Batch

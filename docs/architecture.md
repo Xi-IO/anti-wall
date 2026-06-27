@@ -76,6 +76,7 @@ demo file
 - 这份表允许同时包含 parser 原始事件、推断事件和少量压缩后的连续 emitter
 - `shot_count` 仅用于 `sound_class=weapon` 且 `sound_action=gunfire`，表示一个 gunfire burst 合并了多少条 `fire_bullets`
 - 不引入泛化的 `event_count`；非枪声事件保持 `shot_count=null`
+- observer-specific 听觉结果单独落盘为 `sound_exposure.parquet`，不并入 `visibility.parquet`
 
 ### 3. Domain layer
 
@@ -109,6 +110,7 @@ demo file
 - `SoundTimeline` 消费的是 emitter schema，而不是旧的逐行 `sound_events` 形态
 - gunfire burst compression 属于 domain/IO 边界上的语义整理，不属于 viewer 表现层
 - weapon gunfire 的 burst gap、`shot_count`、`position_mode=entity_at_tick` 都应在进入 viewer 前确定
+- “谁理论上听到了什么”属于独立 `sound_exposure.parquet` 路径，不由 `visibility` schema 承载
 
 当前可见性相关语义也放在 domain 层：
 
@@ -191,9 +193,12 @@ demo file
   - sidebar / bottom bar / 图标等 UI 绘制辅助
 - `info_events.py`
   - 从 interval `visibility.parquet` 读取可见性区间
-  - 校验 schema，旧 tick-level pair artifact 直接报错并提示重新生成
+  - 可选读取 `sound_exposure.parquet`
+  - 校验 visibility / sound feed artifact schema
   - 从 VISIBLE intervals 构建 visibility spotted events
-  - 提供按 tick / player filter 的 feed 辅助函数
+  - 从 `sound_exposure` 构建 sound-derived Info Feed events，并在 viewer 层做 policy / merge / threshold / dedupe / priority 排序
+  - `sound_exposure` 损坏或 schema 不兼容时 fail-soft 忽略，不阻止 viewer startup
+  - 提供按 tick / player filter 的 feed 辅助函数，以及只读 audit 导出辅助函数
 - `renderer.py`
   - 一帧渲染总协调器
 - `render_player.py`
@@ -348,6 +353,7 @@ viewer sidebar feed 路径：
 ```text
 dataset
   -> visibility.parquet
+  -> optional sound_exposure.parquet
   -> viewer.info_events.load_info_events_for_dataset(...)
   -> list[InfoEvent]
   -> shell selection / current_tick filter
@@ -375,6 +381,28 @@ dataset
   -> analysis-specific tables or episodes
 ```
 
+sound exposure 路径：
+
+```text
+dataset
+  -> sound_effect.parquet
+  -> RoundData.sound_timeline
+  -> enemy alive observer vs source audible-range evaluation
+  -> sound_exposure.parquet
+```
+
+sound-derived Info Feed 路径：
+
+```text
+dataset
+  -> optional sound_exposure.parquet
+  -> viewer.info_events._build_sound_feed_rows(...)
+  -> feed-level candidate policy
+  -> movement merge / short-duration drop / hard-step dedupe
+  -> priority sort
+  -> sound-derived InfoEvent
+```
+
 viewer 当前应优先消费：
 
 - `round_players`
@@ -393,15 +421,17 @@ viewer 当前应优先消费：
 - `UtilityTimeline` 基于 segment 做 tick 内插值
 - viewer 不再回退到旧的 raw grenade trajectory artifact
 
-但 sidebar 的 visibility feed 例外地直接消费 precomputed artifact：
+但 sidebar 的 Info Feed 例外地直接消费 precomputed artifact：
 
-- feed 数据来自 `visibility.parquet`
+- visibility feed 数据来自 `visibility.parquet`
+- sound-derived feed 数据来自可选 `sound_exposure.parquet`
 - `visibility.parquet` 的正式 schema 是 interval state table
-- viewer 只支持新版 interval schema；旧 tick-level pair schema 应提示重新运行 `wall visibility <dataset_dir>`
+- viewer 只支持新版 interval visibility schema；旧 tick-level pair schema 应提示重新运行 `wall visibility <dataset_dir>`
+- `sound_exposure.parquet` 属于 optional artifact；缺失时 viewer 正常打开，损坏时 fail-soft 忽略
 - viewer 启动时一次性 preload all-round `InfoEvent`
 - round 切换和 player selection 只过滤已加载事件
 - 不重新读取 parquet
-- 不重新 build spotted events
+- 不重新 build spotted / sound feed events
 
 普通 viewer 打开 dataset 时：
 
@@ -531,13 +561,15 @@ Awpy 的 `maps / navs / tris` 视为运行时外部资产：
 - `visibility.parquet` 已成为 parse 后默认生成的 canonical interval visibility artifact
 - `grenade_trajectory_segments.parquet` 已成为正式投掷物轨迹 artifact
 - `sound_effect.parquet` 已取代旧 `sound_events`，成为正式声音 emitter artifact
+- `sound_exposure.parquet` 已成为 observer-specific heard-event artifact，并保持独立于 `visibility.parquet`
 - gunfire 已从逐发 `fire_bullets` impulse 收口为 burst emitter，并按武器类型使用不同 burst gap
 - `shot_count` 已作为 gunfire 专用字段落到 `sound_effect` schema，用于表达 burst 合并的原始开火次数
 - viewer 投掷物动画已切到 segment artifact，不再消费旧 `grenades.parquet`
 - parse 输出已停止写出旧的 `grenades.parquet/csv`，仅在 parse 进程内短暂保留 raw trajectory 供压缩和声音事件构建使用
 - viewer 声音圈已改为消费 emitter schema 和 `SoundTimeline`，不再直接依赖旧 `sound_events` 事件行
-- viewer sidebar 已切到 visibility event feed，不再显示旧的 round overview / per-player info 面板
-- visibility event feed 已收口到 `viewer/info_events.py`，并只消费 interval visibility schema
+- viewer sidebar 已切到 `Info Feed`，不再显示旧的 round overview / per-player info 面板
+- visibility event feed 与 sound-derived feed 已收口到 `viewer/info_events.py`
+- sound-derived feed 当前只放行高价值声音，并在 viewer 层做 movement merge / hard-step dedupe / priority 排序
 - Players 列表已支持按内部稳定 key 选中，并以 alias fallback 兼容缺少 steamid 的 visibility artifact
 - feed scroll 默认 stick-to-latest，只有用户手动滚动离开底部时才停止自动跟随
 - assets 已按 effects / equipment / ui 分类

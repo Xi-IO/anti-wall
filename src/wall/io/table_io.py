@@ -35,6 +35,7 @@ TABLE_STEMS = (
     "inferno_startburn",
     "grenade_trajectory_segments",
     "sound_effect",
+    "sound_exposure",
     "inferred_rounds",
 )
 
